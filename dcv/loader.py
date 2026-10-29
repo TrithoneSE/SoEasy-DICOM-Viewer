@@ -77,6 +77,9 @@ class Volume:
     frame_time: float | None = None             # ms between frames of a dynamic series (XA / US cine)
     dsa_hint: dict | None = None                # multiframe: what the header says about subtraction (dsa.py)
     loader: object = None                       # FrameLoader while compressed frames are still being decoded
+    # patient coordinate system shared with other series (Frame of Reference UID, else "study:<uid>"); empty =
+    # no usable geometry (XA run, US loop). Reference lines are drawn only between series with the same value.
+    frame_uid: str = ""
 
     @property
     def shape(self):
@@ -395,7 +398,10 @@ def load_series(info: SeriesInfo, progress=None, cancelled=lambda: False) -> Vol
 
     ds0 = items[0][0]
     iop = ds0.get("ImageOrientationPatient")
-    if iop is not None and all("ImagePositionPatient" in d for d, _ in items):
+    # some derived maps (e.g. color FA) carry an all-zero orientation: no patient geometry
+    geometric = (iop is not None and len(iop) == 6 and all("ImagePositionPatient" in d for d, _ in items)
+                 and np.linalg.norm(np.cross(np.array(iop[:3], float), np.array(iop[3:], float))) > 0.5)
+    if geometric:
         row = np.array(iop[:3], float)
         col = np.array(iop[3:], float)
         normal = np.cross(row, col)
@@ -437,6 +443,7 @@ def load_series(info: SeriesInfo, progress=None, cancelled=lambda: False) -> Vol
         uid=info.uid,
         files=[str(getattr(d, "filename", "")) for d, _ in items],
         direction=direction,
+        frame_uid=_frame_uid(ds0, info) if geometric else "",
     )
 
 
@@ -548,6 +555,14 @@ def _load_progressive(info, head, n):
         vol.loader.wait(k)
     vol.loader.start()
     return vol
+
+
+def _frame_uid(ds, info):
+    """Frame of Reference UID (series that share it share patient coordinates), else the study."""
+    uid = str(ds.get("FrameOfReferenceUID", "") or "")
+    if uid:
+        return uid
+    return f"study:{info.study_uid}" if info.study_uid else ""
 
 
 def _frame_time(ds):

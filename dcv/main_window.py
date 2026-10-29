@@ -410,6 +410,7 @@ class MainWindow(QMainWindow):
         self.rows, self.cols = 1, 1
         self.maximized = None
         self.link = True
+        self.ref_lines = True                    # reference lines between viewports (View menu)
         self.vr_windows = {}
         self.mpr_windows = {}
         self.tract_windows = []
@@ -712,6 +713,13 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(self._act("Crosshair on/off", lambda: self._all_slices(
             lambda v: (setattr(v, "show_cross", not v.show_cross), v.update())), "X"))
+        ref = self._act("Reference lines", self._toggle_ref_lines, "Ctrl+Shift+L",
+                        "Show where the slices of the other viewports cut each image; drag a line to move that slice")
+        ref.setCheckable(True)
+        ref.setChecked(self.ref_lines)
+        self.ref_act = ref
+        self.addAction(ref)
+        m.addAction(ref)
         m.addAction(self.link_act)
         m.addAction(self.annot_act)
         m.addAction(self.privacy_act)
@@ -772,6 +780,9 @@ class MainWindow(QMainWindow):
         s.status.connect(lambda m: self.statusBar().showMessage(m, 3000))
         s.cineChanged.connect(self._on_cine_changed)
         s.seriesStep.connect(self._series_step)
+        s.ref_sources = self._ref_sources
+        s.show_ref_lines = self.ref_lines
+        s.planeChanged.connect(self._on_plane_changed)
         self.viewports.append(vp)
         return vp
 
@@ -794,6 +805,8 @@ class MainWindow(QMainWindow):
             self.grid.setColumnStretch(i % cols, 1)
             vp.show()
         self.rows, self.cols = rows, cols
+        for vp in self.viewports[:n]:
+            vp.slice.update()                    # reference lines of the viewports now shown
         if self.active not in self.viewports[:n]:
             self._set_active(self.viewports[0])
         if loaded:
@@ -1462,6 +1475,22 @@ class MainWindow(QMainWindow):
                 a.setChecked(True)
                 break
 
+    # ==================================================== reference lines
+    def _ref_sources(self):
+        """Viewports whose slices are drawn as reference lines in the others."""
+        return [vp.slice for vp in self.visible_viewports() if vp.slice.state is not None]
+
+    def _on_plane_changed(self, src):
+        for vp in self.visible_viewports():
+            if vp.slice is not src and vp.slice.state is not None:
+                vp.slice.update()
+
+    def _toggle_ref_lines(self):
+        self.ref_lines = self.ref_act.isChecked()
+        for vp in self.viewports:
+            vp.slice.show_ref_lines = self.ref_lines
+            vp.slice.update()
+
     # ============================================================= sync
     def _toggle_link(self):
         self.link = self.link_act.isChecked()
@@ -1708,7 +1737,10 @@ class MainWindow(QMainWindow):
             "  LEFT-click a tool button = assign it to the left mouse button (blue line)\n"
             "  RIGHT-click a tool button = assign it to the right mouse button (pink line)\n"
             "  Middle button = pan • Wheel = slice • Ctrl+wheel = zoom at cursor\n"
-            "  Double-click / F = maximise viewport • F11 = full screen\n\n"
+            "  Double-click / F = maximise viewport • F11 = full screen\n"
+            "  Reference lines: each viewport shows where the slices of the others cut it (yellow axial, pink "
+            "coronal,\n  blue sagittal), only as long as that slice has image. Scroll any viewport and the lines "
+            "follow;\n  drag a line to move that viewport's slice.\n\n"
             "MPR (Ctrl+M) and 3D (Ctrl+3) open in separate windows.\n"
             "  MPR: all 2D tools + drag a line = shift plane, drag a circle = rotate (oblique), drag centre = move.\n"
             "  3D: color curves, 🦴 bone color lock, crop, scalpel, inspect, segmentation, 3D length/angle.\n\n"
@@ -1722,7 +1754,7 @@ class MainWindow(QMainWindow):
             "SHORTCUTS: W W/L • M pan • Z zoom • S browse • L length • E ellipse • U rectangle • G polygon\n"
             "  O open polygon • A angle • C Cobb • D deviation • Y arrow • P pencil • T text\n"
             "  Q 3D cursor • K color picker • B brush • J seed • R W/L ROI • I invert • 0 auto W/L\n"
-            "  1–9 window presets • X crosshair • Ctrl+L link • Ctrl+T DICOM tags\n\n"
+            "  1–9 window presets • X crosshair • Ctrl+L link • Ctrl+Shift+L reference lines • Ctrl+T DICOM tags\n\n"
             "Note: a personal visualisation aid, not a certified diagnostic device."))
 
 

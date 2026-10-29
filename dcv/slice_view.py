@@ -52,6 +52,10 @@ def _blur3(a):
             + p[2:, :-2] + 2 * p[2:, 1:-1] + p[2:, 2:]) / 16.0
 
 
+# reference line colors by the plane of the viewport that owns the slice (same as the MPR axes)
+PLANE_COLORS = {"sagittal": QColor(40, 170, 255), "coronal": QColor(255, 60, 150), "axial": QColor(255, 215, 0)}
+REF_HIT_PX = 5
+
 FILTERS = {
     "none": ("No filter", lambda a: a),
     "smooth": ("Smooth", _blur3),
@@ -130,6 +134,7 @@ class SliceView(QWidget):
     status = Signal(str)
     cineChanged = Signal(object)         # play / pause of this viewport changed
     seriesStep = Signal(object, int)     # cine bar: previous (-1) / next (+1) series in this viewport
+    planeChanged = Signal(object)        # shown slice / series / plane changed (others redraw their reference lines)
 
     def __init__(self, orientation="axial", parent=None):
         super().__init__(parent)
@@ -174,6 +179,11 @@ class SliceView(QWidget):
         self._cine = QTimer(self)
         self._cine.timeout.connect(lambda: self.set_index((self.index + 1) % max(1, self.count())))
         self.cine_bar = CineBar(self)
+        # reference lines: where the slices of the other viewports cut this image. ref_sources() -> the other
+        # SliceViews (set by the main window); a line can be dragged to move that viewport's slice.
+        self.ref_sources = None
+        self.show_ref_lines = True
+        self._ref_drag = None
 
     # ================================================================ data
     @property
@@ -197,6 +207,7 @@ class SliceView(QWidget):
                 lo, hi = np.percentile(v.frame(self.index) if dynamic else v.data[v.shape[0] // 2], (0.5, 99.5))
                 self.ww, self.wl = max(1.0, float(hi - lo)), float(hi + lo) / 2
         self.reset_view()
+        self.planeChanged.emit(self)
 
     def set_orientation(self, o):
         if o != "axial":
@@ -207,6 +218,7 @@ class SliceView(QWidget):
         self.rot = 0
         self.flip_h = self.flip_v = False
         self.reset_view()
+        self.planeChanged.emit(self)
 
     def count(self):
         if self.vol is None:
@@ -289,10 +301,112 @@ class SliceView(QWidget):
         """Slice position (mm) along the plane normal in patient space."""
         return float(np.dot(self.plane_center_world(), self.plane_axes_lps()[2]))
 
-    def set_from_world(self, p):
+    def set_from_world(self, p, emit=False):
         """Show the slice that contains (or is nearest to) patient point p."""
         z, y, x = self.vol.world_to_index(np.asarray(p, float))
-        self.set_index(int(round({"axial": z, "coronal": y, "sagittal": x}[self.orientation])), emit=False)
+        self.set_index(int(round({"axial": z, "coronal": y, "sagittal": x}[self.orientation])), emit=emit)
+
+    def image_to_world(self, u, v):
+        """Continuous image coordinates (pixel (r, c) spans r..r+1, c..c+1) of the shown slice -> patient LPS."""
+        nz = self.vol.shape[0]
+        r, c = u - 0.5, v - 0.5
+        zyx = {"axial": (self.index, r, c), "coronal": (nz - 1 - r, self.index, c),
+               "sagittal": (nz - 1 - r, c, self.index)}[self.orientation]
+        return self.vol.index_to_world(np.array(zyx, float))
+
+    def has_geometry(self):
+        """Slices placed in patient space (not a dynamic run / loop without position)."""
+        return self.vol is not None and bool(self.vol.frame_uid) and not (
+            self.vol.frame_time is not None and self.orientation == "axial")
+
+    def plane_name(self):
+        n = np.abs(self.plane_axes_lps()[2])
+        return ("sagittal", "coronal", "axial")[int(np.argmax(n))]
+
+    def ref_segments(self):
+        """[(source view, (u0, v0), (u1, v1))]: the slices of the other viewports as lines in this image, each cut
+        to where that slice has image data (a partial MRI slab gives a short line)."""
+        if not (self.show_ref_lines and self.ref_sources is not None and self.has_geometry()):
+            return []
+        h, w = self.raw_plane().shape
+        o = self.image_to_world(0, 0)
+        du, dv = self.image_to_world(1, 0) - o, self.image_to_world(0, 1) - o
+        n_t = self.plane_axes_lps()[2]
+        out = []
+        for src in self.ref_sources():
+            if src is self or not src.has_geometry() or src.vol.frame_uid != self.vol.frame_uid:
+                continue
+            n_s = src.plane_axes_lps()[2]
+            if abs(float(np.dot(n_s, n_t))) > 0.9:            # (nearly) parallel: no line
+                continue
+            # the source plane in this image: a*u + b*v + d = 0
+            a, b = float(np.dot(du, n_s)), float(np.dot(dv, n_s))
+            d = float(np.dot(o - src.plane_center_world(), n_s))
+            pts = []
+            if abs(b) > 1e-9:
+                pts += [(u, -(a * u + d) / b) for u in (0.0, float(h))]
+            if abs(a) > 1e-9:
+                pts += [(-(b * v + d) / a, v) for v in (0.0, float(w))]
+            pts = [q for q in pts if -1e-6 <= q[0] <= h + 1e-6 and -1e-6 <= q[1] <= w + 1e-6]
+            if len(pts) < 2:
+                continue
+            p0, p1 = max(((q0, q1) for q0 in pts for q1 in pts), key=lambda e: math.dist(*e))
+            if math.dist(p0, p1) < 1e-6:
+                continue
+            # keep the part inside the source slice: its two in-plane voxel indices are linear along the line
+            i0 = src.vol.world_to_index(o + p0[0] * du + p0[1] * dv)
+            i1 = src.vol.world_to_index(o + p1[0] * du + p1[1] * dv)
+            ax = {"axial": (1, 2), "coronal": (0, 2), "sagittal": (0, 1)}[src.orientation]
+            t0, t1 = 0.0, 1.0
+            for k in ax:
+                lo, hi = -0.5, src.vol.shape[k] - 0.5
+                a0, da = float(i0[k]), float(i1[k] - i0[k])
+                if abs(da) < 1e-9:
+                    if not lo <= a0 <= hi:
+                        t0, t1 = 1.0, 0.0
+                    continue
+                ta, tb = sorted(((lo - a0) / da, (hi - a0) / da))
+                t0, t1 = max(t0, ta), min(t1, tb)
+            if t1 - t0 < 1e-6:
+                continue
+            seg = [(p0[0] + t * (p1[0] - p0[0]), p0[1] + t * (p1[1] - p0[1])) for t in (t0, t1)]
+            out.append((src, seg[0], seg[1]))
+        return out
+
+    def _hit_ref_line(self, pos):
+        best, best_d = None, REF_HIT_PX
+        for src, a, b in self.ref_segments():
+            pa, pb = self.image_to_widget(*a), self.image_to_widget(*b)
+            ax, ay, bx, by = pa.x(), pa.y(), pb.x(), pb.y()
+            L2 = (bx - ax) ** 2 + (by - ay) ** 2
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((pos.x() - ax) * (bx - ax) + (pos.y() - ay) * (by - ay)) / L2))
+            dd = math.hypot(pos.x() - (ax + t * (bx - ax)), pos.y() - (ay + t * (by - ay)))
+            if dd <= best_d:
+                best, best_d = src, dd
+        return best
+
+    def _paint_ref_lines(self, p):
+        segs = self.ref_segments()
+        if not segs:
+            return
+        p.save()
+        p.setFont(QFont("Segoe UI", 8))
+        fm = p.fontMetrics()
+        for src, a, b in segs:
+            col = QColor(PLANE_COLORS[src.plane_name()])
+            pa, pb = self.image_to_widget(*a), self.image_to_widget(*b)
+            p.setPen(QPen(col, 2.5 if src is self._ref_drag else 1.3))
+            p.drawLine(pa, pb)
+            # which series: its name at the left (or upper) end, so several lines of one plane stay apart
+            q = min((pa, pb), key=lambda t: (round(t.x()), t.y()))
+            text = src.vol.description[:28]
+            x = min(max(q.x() + 4, 2), self.width() - fm.horizontalAdvance(text) - 4)
+            y = min(max(q.y() - 4, fm.ascent() + 2), self.height() - 4)
+            p.setPen(QColor(0, 0, 0, 200))
+            p.drawText(QPointF(x + 1, y + 1), text)
+            p.setPen(col)
+            p.drawText(QPointF(x, y), text)
+        p.restore()
 
     def _plane_voxel_grid(self):
         """(h, w, 3) float (z, y, x) voxel indices of every pixel of the raw plane."""
@@ -396,6 +510,7 @@ class SliceView(QWidget):
             self.index = k
             self._creating = None
             self.invalidate()
+            self.planeChanged.emit(self)
             if emit:
                 self.indexChanged.emit(self)
 
@@ -653,6 +768,7 @@ class SliceView(QWidget):
             p.drawLine(QPointF(rect.left(), pt.y()), QPointF(rect.right(), pt.y()))
             p.drawLine(QPointF(pt.x(), rect.top()), QPointF(pt.x(), rect.bottom()))
 
+        self._paint_ref_lines(p)
         sr, sc = self._spacing_rc()
         unit = " HU" if self.vol.modality == "CT" else ""
         plane = self.raw_plane()
@@ -792,6 +908,12 @@ class SliceView(QWidget):
                 self._label_drag = m
                 self.update()
                 return
+            # a reference line: drag it to move the other viewport's slice (like the MPR axes)
+            src = self._hit_ref_line(pos)
+            if src is not None:
+                self._ref_drag = src
+                self.update()
+                return
         if tool is None:
             return
         # edit an existing measurement
@@ -853,11 +975,14 @@ class SliceView(QWidget):
                 return
         if self._press is None:
             on_label = self._creating is None and self._hit_label(pos) is not None
+            on_ref = self._creating is None and not on_label and self._hit_ref_line(pos) is not None
             if on_label:
                 self.setCursor(Qt.OpenHandCursor)
+            elif on_ref:
+                self.setCursor(Qt.SizeAllCursor)
             elif getattr(self, "_hand_cursor", False):
                 self.unsetCursor()
-            self._hand_cursor = on_label
+            self._hand_cursor = on_label or on_ref
             self.update()
             return
         d = pos - self._last
@@ -866,7 +991,10 @@ class SliceView(QWidget):
             self._moved = True
         button = self._press[1]
         tool = self._tool_for(button)
-        if self._label_drag is not None:
+        if self._ref_drag is not None:
+            if self._ref_drag.vol is not None:
+                self._ref_drag.set_from_world(self.image_to_world(r, c), emit=True)
+        elif self._label_drag is not None:
             self._label_drag.move_label(d.x(), d.y())
         elif self._handle:
             m, h = self._handle
@@ -911,7 +1039,9 @@ class SliceView(QWidget):
             return
         button = self._press[1]
         tool = self._tool_for(button)
-        if self._label_drag is not None or self._handle or self._move:
+        if self._ref_drag is not None:
+            self._ref_drag = None
+        elif self._label_drag is not None or self._handle or self._move:
             self._label_drag = self._handle = self._move = None
             self.annotChanged.emit(self.state)
         elif self._creating is not None:

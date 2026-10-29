@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import pydicom
 
-from .loader import Volume, _direction_from_iop, _rescale
+from .loader import Volume, _direction_from_iop, _frame_uid, _rescale
 
 
 # ============================================================ DICOM tags
@@ -103,11 +103,12 @@ class DWIData:
     description: str
     patient: str
     uid: str
+    frame_uid: str = ""
 
     def volume(self, data, modality, description, rgb=None):
         v = Volume(data=data, spacing=self.spacing, origin=self.origin, modality=modality,
                    description=description, patient=self.patient, uid=f"{self.uid}-{modality}",
-                   direction=self.direction, rgb=rgb)
+                   direction=self.direction, rgb=rgb, frame_uid=self.frame_uid)
         return v
 
     def bvecs_image(self, flip=(1, 1, 1)):
@@ -193,7 +194,8 @@ def load_dwi(info, progress=None):
         progress(n, n, "Done")
     return DWIData(data=data, bvals=np.array(bvals, float), bvecs=np.array(bvecs, float), frame=frame,
                    spacing=(abs(sz), sy, sx), origin=tuple(float(v) for v in origin), direction=D,
-                   description=info.description, patient=info.patient, uid=info.uid)
+                   description=info.description, patient=info.patient, uid=info.uid,
+                   frame_uid=_frame_uid(ds0, info))
 
 
 # ======================================================== tensor fitting

@@ -50,6 +50,9 @@
   about 1 GB of RAM.
 - **2D viewing** with free window / level, presets, measurements (length, angle, Cobb, ellipse, rectangle, polygon,
   text…), MIP / MinIP slabs, filters, colour maps and a layout of up to 5 × 5 viewports.
+- **Reference lines** between viewports — an axial, a sagittal and a coronal series side by side show where each
+  other's slices cut them, follow every scroll and can be dragged like MPR axes; handy for MRI sequences that cover
+  only part of the head.
 - **MPR** — sagittal, coronal and axial planes, obliquely rotatable, with every 2D tool.
 - **Colour 3D volume rendering** with an interactive curve editor: tissue colours and opacity drawn as curves over
   the histogram, a **bone colour lock** that keeps bone in bone colours, and a **rim filter** that separates an
@@ -137,6 +140,11 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 - Window / level by dragging, with presets (keys 1–9), exact values, *Auto* (0) and *W/L ROI* (draw a box).
 - Layouts from 1 × 1 to 5 × 5, slice synchronisation between series, cross-reference cursor (Q), rotate / flip /
   invert, MIP / MinIP / average slabs, smoothing and sharpening filters, colour maps.
+- Reference lines (Ctrl+Shift+L): every viewport shows the current slices of the other viewports as coloured lines
+  (yellow axial, pink coronal, blue sagittal) labelled with the series name. A line is only as long as that slice has
+  image, so a partial MRI slab shows where it starts and ends. Scrolling any viewport moves its line in the others;
+  dragging a line moves that viewport's slice. Lines are drawn only between series in the same patient coordinate
+  system (frame of reference).
 - Measurements: length, angle, Cobb angle, open / closed polygon, ellipse and rectangle ROIs (area, mean, SD,
   min / max), arrow, pencil, text and deviation. Lengths are shown in mm below 1 cm and in cm above. Captions can be
   dragged out of the way. ABC/2 volume calculator.
@@ -197,7 +205,7 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 | Ctrl+M, Ctrl+3, Ctrl+U, Ctrl+D | MPR, 3D, fusion, DTI |
 | Ctrl+Space or Space | cine play / pause |
 | / , Shift+/ , Ctrl+Shift+/ , Shift+M | DSA on / off, displayed frame as mask, reset mask, manual pixel shift |
-| Ctrl+L, X, F, F11 | synchronise slices, crosshair, maximise viewport, full screen |
+| Ctrl+L, Ctrl+Shift+L, X, F, F11 | synchronise slices, reference lines, crosshair, maximise viewport, full screen |
 | Ctrl+Shift+H | hide patient identity on screen |
 | Ctrl+S, Ctrl+Shift+C, Ctrl+T | save image, copy image, DICOM tags |
 | F1 | quick guide (every window has its own) |
