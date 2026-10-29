@@ -1,0 +1,9 @@
+# Python 3.12 (64-bit). Exact versions of every package, including dependencies: requirements-lock.txt
+numpy==2.5.4
+pydicom==3.0.2
+pylibjpeg==2.1.0
+pylibjpeg-libjpeg==2.5.0
+pylibjpeg-openjpeg==2.6.0
+pillow==13.0.0
+PySide6-Essentials==6.12.0     # Qt Core / Gui / Widgets / Svg (the full PySide6 adds ~1 GB of unused modules)
+vtk==9.7.1

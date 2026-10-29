@@ -1,0 +1,17 @@
+# environments and generated files
+.venv/
+dist/
+build/
+packaging/build/
+__pycache__/
+*.pyc
+tests/out/
+selftest*.txt
+
+# Never commit patient data. Only the synthetic studies in samples/ belong in the repository.
+*.dcm
+DICOMDIR
+data/
+pasien*/
+patient*/
+DICOM/
