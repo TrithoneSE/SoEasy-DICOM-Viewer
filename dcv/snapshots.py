@@ -102,7 +102,7 @@ def capture(vw):
                 gain=vw.state.gain, blend=vw._blend, thumb=_thumb_png(grab_rgb(vr)))
 
 
-def apply(vw, snap, colors=True):
+def apply(vw, snap, colors=True, crop=True):
     vr = vw.vr
     if colors:
         if snap.get("blend") and snap["blend"] != vw._blend:
@@ -110,16 +110,30 @@ def apply(vw, snap, colors=True):
         vw.set_tf(TransferFunction.from_dict(snap["tf"]))
         vw.gain_slider.setValue(int(round(snap.get("gain", 1.0) * 100)))
         vw.apply_tf()
-    crop = snap.get("crop") or {}
+    if crop:
+        _apply_crop(vw, snap.get("crop") or {})
+    _set_camera(vr.renderer.GetActiveCamera(), snap["camera"])
+    vr.renderer.ResetCameraClippingRange()
+    vr.render()
+
+
+def _apply_crop(vw, crop):
+    vr = vw.vr
     if crop.get("matrix"):
         _set_box_matrix(vr, crop["matrix"])
     if bool(crop.get("on")) != vw.crop_act.isChecked():
         vw.crop_act.setChecked(bool(crop.get("on")))      # toggles VolumeView.set_crop
     elif vr.crop_on and vr.box_widget is not None:
         vr._on_box(vr.box_widget, None)
-    _set_camera(vr.renderer.GetActiveCamera(), snap["camera"])
-    vr.renderer.ResetCameraClippingRange()
-    vr.render()
+
+
+def _movie_box(snap):
+    """Crop box matrix a movie flies through: a snapshot without crop counts as the whole volume (the box placed
+    on the volume bounds = identity), so the cut opens and closes smoothly instead of switching mid-flight."""
+    crop = snap.get("crop") or {}
+    if crop.get("on") and crop.get("matrix"):
+        return crop["matrix"]
+    return [1.0 if i == j else 0.0 for i in range(4) for j in range(4)]
 
 
 # ----------------------------------------------------------------- files
@@ -165,17 +179,18 @@ def make_movie(vw, snaps, movie, path, progress=None):
     frames, order = movie_frames(snaps, movie)
     ci = vtk.vtkCameraInterpolator()
     ci.SetInterpolationTypeToSpline()
-    ti = vtk.vtkTransformInterpolator()
-    have_box = all((snaps[i].get("crop") or {}).get("matrix") for i in order)
+    have_box = any((snaps[i].get("crop") or {}).get("on") for i in order)
     for k, i in enumerate(order):
         cam = vtk.vtkCamera()
         _set_camera(cam, snaps[i]["camera"])
         ci.AddCamera(float(k), cam)
-        if have_box:
-            t = vtk.vtkTransform()
-            t.SetMatrix(snaps[i]["crop"]["matrix"])
-            ti.AddTransform(float(k), t)
+    # crop box: element-wise blend of the matrices. vtkTransformInterpolator splits a matrix into rotation and
+    # scale, which a box that was turned and then shortened (rotation x non-uniform scale) does not survive: the
+    # box jumped to another shape right after the first snapshot. A blend is exact at every snapshot.
+    boxes = [np.array(_movie_box(snaps[i]), float) for i in order] if have_box else []
     saved = capture(vw)
+    if have_box and not vw.crop_act.isChecked():
+        vw.crop_act.setChecked(True)                     # the crop stays on for the whole flight
     gif = path.lower().endswith(".gif")
     base, _ = os.path.splitext(path)
     images, color_of, written = [], None, 0
@@ -186,12 +201,15 @@ def make_movie(vw, snaps, movie, path, progress=None):
                 if progress.cancelled():
                     return 0
             if ci_idx != color_of:
-                apply(vw, snaps[ci_idx], colors=True)
+                apply(vw, snaps[ci_idx], colors=True, crop=not have_box)
                 color_of = ci_idx
             ci.InterpolateCamera(t, vr.renderer.GetActiveCamera())
             if have_box:
+                k = min(int(t), len(boxes) - 1)
+                f = t - k
+                m = boxes[k] if f <= 0 or k + 1 >= len(boxes) else (1 - f) * boxes[k] + f * boxes[k + 1]
                 tt = vtk.vtkTransform()
-                ti.InterpolateTransform(t, tt)
+                tt.SetMatrix(m.tolist())
                 vr.box_widget.GetRepresentation().SetTransform(tt)
                 if vr.crop_on:
                     vr._on_box(vr.box_widget, None)
@@ -208,6 +226,8 @@ def make_movie(vw, snaps, movie, path, progress=None):
             images[0].save(path, save_all=True, append_images=images[1:], loop=0,
                            duration=int(round(1000 / max(1, int(movie.get("fps", 20))))), optimize=False)
     finally:
+        if have_box and not saved["crop"].get("matrix"):
+            saved["crop"]["matrix"] = _movie_box({})      # the box was made for the movie: back to the whole volume
         apply(vw, saved, colors=True)
     return written
 

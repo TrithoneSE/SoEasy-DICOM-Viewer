@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/3d-cinematic.gif" width="640" alt="3D snapshot movie: the skull opens to show the skull base and its arteries">
+  <img src="docs/media/3d-cinematic.gif" width="640" alt="3D snapshot movie: the skull opens to show a segmented tumour and the arteries around it">
 </p>
 
 > **Not a medical device.** SoEasy DICOM Viewer is a visualisation tool for education, research and personal use.
@@ -76,11 +76,10 @@ All images below come from real clinical studies shown in the viewer's anonymous
 | <img src="docs/media/dsa.png" alt="DSA"> | <img src="docs/media/dti-tractography.png" alt="DTI tractography"> |
 | **DSA** — subtracted carotid run with automatic pixel shift. | **DTI tractography** — whole-brain streamlines over colour FA (MRI, 20 directions). |
 
-<p align="center">
-  <img src="docs/media/3d-tumor-feeders.gif" width="480" alt="Rotating view of the segmented tumour and its vessels">
-  &nbsp;
-  <img src="docs/media/dsa.gif" width="360" alt="DSA run playing">
-</p>
+| | |
+|---|---|
+| <img src="docs/media/3d-tumor-feeders.gif" height="280" alt="Rotating view of the segmented tumour and its vessels"> | <img src="docs/media/dsa.gif" height="280" alt="DSA run playing"> |
+| **Segmentation in motion** — the segmented tumour turning with its feeding arteries. | **DSA cine** — a subtracted run playing at the scanner's frame rate. |
 
 ## Download and install
 

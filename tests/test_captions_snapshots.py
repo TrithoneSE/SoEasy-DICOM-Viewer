@@ -19,6 +19,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 from dcv import busy as busy_mod  # noqa: E402
 from dcv import snapshots  # noqa: E402
+from dcv import vtk_lite as vtk  # noqa: E402
 from dcv.loader import scan_folder  # noqa: E402
 from dcv.main_window import MainWindow  # noqa: E402
 from dcv.measure import Measurement  # noqa: E402
@@ -211,7 +212,7 @@ def run():
             vr.reset_crop()
             vr.render()
             b0 = list(rep.GetBounds())
-            from dcv import vtk_lite as vtk
+
             pd = vtk.vtkPolyData()
             rep.GetPolyData(pd)
             face = np.array(pd.GetPoint(9))          # +x face handle
@@ -265,6 +266,14 @@ def run():
         panel.add()
         vr.view("left")
         vw.crop_act.setChecked(True)
+        rep = vr.box_widget.GetRepresentation()
+        zb = vr.image.GetBounds()[4:6]
+        half = vtk.vtkTransform()                         # cut away the upper half
+        half.Translate(0, 0, zb[0])
+        half.Scale(1, 1, 0.5)
+        half.Translate(0, 0, -zb[0])
+        rep.SetTransform(half)
+        vr._on_box(vr.box_widget, None)
         panel.add()
         cam = vr.renderer.GetActiveCamera()
         pos_left = np.array(cam.GetPosition())
@@ -277,7 +286,21 @@ def run():
         snaps, movie = snapshots.load_file(path)
         check(len(snaps) == 2 and snaps[1]["camera"] == panel.snaps[1]["camera"], "snapshot file round trip")
         gif = os.path.join(out_dir, "movie.gif")
-        n = snapshots.make_movie(vw, panel.snaps, dict(frames=6, hold=1, fps=10, width=320, loop=False), gif)
+        tops = []
+
+        class Probe:                                      # box top + crop state before each frame is drawn
+            def __call__(self, i, total):
+                tops.append((vr.crop_on, rep.GetBounds()[5] if vr.box_widget else None))
+
+            def cancelled(self):
+                return False
+
+        n = snapshots.make_movie(vw, panel.snaps, dict(frames=6, hold=1, fps=10, width=320, loop=False), gif,
+                                 Probe())
+        z_mid = (zb[0] + zb[1]) / 2
+        seen = [t for on, t in tops[1:] if on]
+        check(len(seen) == len(tops) - 1 and any(z_mid + 1 < t < zb[1] - 1 for t in seen),
+              f"movie crop opens gradually from no crop to the cut (box tops {np.round(seen, 1)})")
         from PIL import Image
         with Image.open(gif) as im:            # Pillow merges identical consecutive frames (the pauses)
             total = 0
@@ -285,6 +308,31 @@ def run():
                 im.seek(i)
                 total += im.info.get("duration", 0)
         check(n == 8 and abs(total - n * 100) <= n * 2, f"movie GIF: {n} frames rendered, {total} ms long")
+
+        # a box turned by a drag on it, then shortened (rotation x non-uniform scale). These are the box matrices
+        # of a real study's snapshots: vtkTransformInterpolator dropped the turn right after snapshot 1.
+        ma = [0.98, -0.18, 0.06, 16.43, 0.17, 0.69, -0.71, 80.55, 0.08, 0.7, 0.71, -61.38, 0, 0, 0, 1]
+        mb = [0.98, -0.12, 0.06, 16.43, 0.17, 0.46, -0.71, 80.55, 0.08, 0.47, 0.71, -61.38, 0, 0, 0, 1]
+        sa = {**panel.snaps[1], "crop": dict(on=True, matrix=ma)}
+        sb = {**panel.snaps[1], "crop": dict(on=True, matrix=mb)}
+        mats = []
+
+        class BoxProbe(Probe):                            # box matrix of the frame drawn before this call
+            def __call__(self, i, total):
+                t = vtk.vtkTransform()
+                rep.GetTransform(t)
+                mats.append(np.array([t.GetMatrix().GetElement(r, c) for r in range(4) for c in range(4)]))
+
+        movie2 = dict(frames=10, hold=1, fps=10, width=160, loop=True)
+        snaps3 = [sa, sb, sb]
+        snapshots.make_movie(vw, snaps3, movie2, os.path.join(out_dir, "movie2.gif"), BoxProbe())
+        frames, order = snapshots.movie_frames(snaps3, movie2)
+        keys = [np.array(m) for m in (ma, mb, mb, ma)]
+        dev = []
+        for m, (_, t) in zip(mats[1:], frames):
+            k = min(int(t), len(keys) - 2)
+            dev.append(np.abs(m - ((1 - (t - k)) * keys[k] + (t - k) * keys[k + 1])).max())
+        check(max(dev) < 0.05, f"turned + shortened box follows its snapshots (largest deviation {max(dev):.2f})")
         vw.grab().save(os.path.join(out_dir, "vr.png"))
     except Exception:
         traceback.print_exc()
