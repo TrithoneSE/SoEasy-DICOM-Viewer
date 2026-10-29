@@ -70,9 +70,9 @@ All images below come from real clinical studies shown in the viewer's anonymous
 | | |
 |---|---|
 | <img src="docs/media/2d-viewer.png" alt="2D viewer"> | <img src="docs/media/mpr.png" alt="MPR"> |
-| **2D viewer** — contrast CT, axial with a length measurement and a coronal reformat side by side. | **MPR** — sagittal, coronal and axial planes centred on a skull-base tumour. |
+| **2D viewer** — contrast CT, axial with a length measurement (open polygon and length feature with moveable caption) | **MPR** — sagittal, coronal and axial planes centred on a skull-base tumour. |
 | <img src="docs/media/3d-vessels-bone.png" alt="3D vessels and bone"> | <img src="docs/media/3d-tumor-feeders.png" alt="Tumour segmentation"> |
-| **3D volume rendering** — skull base seen from above with the vault cropped away; the curve editor on the right. | **Segmentation** — a tumour grown from one click (19.8 ml) shown with the surrounding vessels. |
+| **3D volume rendering** — skull base seen from above with the vault cropped away; the curve editor on the right. | **Segmentation** — a tumour grown from one click (79.73 ml) shown with the surrounding vessels. |
 | <img src="docs/media/dsa.png" alt="DSA"> | <img src="docs/media/dti-tractography.png" alt="DTI tractography"> |
 | **DSA** — subtracted carotid run with automatic pixel shift. | **DTI tractography** — whole-brain streamlines over colour FA (MRI, 20 directions). |
 
