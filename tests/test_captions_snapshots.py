@@ -175,6 +175,21 @@ def run():
         vw = w.vr_windows.get(id(st))
         check(vw is not None, "seed opened the 3D window")
 
+        # 3b) Smooth noise first: off by default, toggling re-grows the selected segment in place
+        check(not vw.seg_smooth.isChecked(), "Smooth noise first is off by default")
+        if st.segments:
+            old = st.active_segment
+            n, idx = len(st.segments), st.segments.index(old)
+            vw.seg_smooth.setChecked(True)
+            app.processEvents()
+            new = st.active_segment
+            check(new is not old and len(st.segments) == n and st.segments[idx] is new
+                  and new.seed == old.seed and new.name == old.name, "toggling smoothing re-grows the segment")
+            vw.seg_smooth.setChecked(False)
+            app.processEvents()
+        else:
+            check(False, "seed produced a segment to re-grow")
+
         # 4/5) toolbar: Rotate / Roll / Turn and crop buttons visible side by side
         from PySide6.QtWidgets import QToolBar
         tb = next(t for t in vw.findChildren(QToolBar) if t.objectName() == "tools3d")

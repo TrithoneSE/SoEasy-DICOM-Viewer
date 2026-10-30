@@ -270,6 +270,7 @@ class Segment:
         self.spacing = spacing
         self.smooth = True
         self.range = None
+        self.seed = None            # clicked voxel it was grown from; None once the brush has changed it
         self.polydata = None
         self.version = 0
         self.rebuild()

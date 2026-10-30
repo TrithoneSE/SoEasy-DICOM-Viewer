@@ -445,9 +445,11 @@ class VRWindow(QMainWindow):
         self.seg_crop.setChecked(True)
         f.addRow(self.seg_crop)
         self.seg_smooth = QCheckBox("Smooth noise first (1 mm)")
-        self.seg_smooth.setChecked(True)
+        self.seg_smooth.setChecked(False)
         self.seg_smooth.setToolTip("Grow on a lightly smoothed copy: on noisy CT the lesion stays one solid region\n"
-                                   "instead of speckles and holes. Turn off for thin structures (small vessels).")
+                                   "instead of speckles and holes. Leave off for thin structures (small vessels).\n"
+                                   "Toggling re-grows the selected segment from its click at once.")
+        self.seg_smooth.toggled.connect(self._on_seg_smooth_toggled)
         f.addRow(self.seg_smooth)
         self.seg_name = QLineEdit("Tumor")
         f.addRow("Name:", self.seg_name)
@@ -908,19 +910,26 @@ class VRWindow(QMainWindow):
             self.seg_color = (c.redF(), c.greenF(), c.blueF())
             self.seg_color_btn.setIcon(_swatch(self.seg_color))
 
-    def seed(self, z, y, x, busy=None):
+    def seed(self, z, y, x, busy=None, replace=None):
         """Grow a segment from a clicked voxel. busy: a BusyDialog already on screen (from the main window);
-        without one a panel is shown here, so the click never just freezes the window."""
+        without one a panel is shown here, so the click never just freezes the window. replace: a segment
+        that the new one takes the place of (same name, colour and position in the list)."""
         own = busy is None
         if own:
             busy = BusyDialog(self, "Segmenting")
         try:
-            self._seed(z, y, x, busy)
+            self._seed(z, y, x, busy, replace)
         finally:
             if own:
                 busy.close()
 
-    def _seed(self, z, y, x, busy):
+    def _on_seg_smooth_toggled(self, _):
+        """The checkbox acts on the selected segment at once: re-grow it from its own click."""
+        seg = self.state.active_segment
+        if seg is not None and seg.seed is not None and seg in self.state.segments:
+            self.seed(*seg.seed, replace=seg)
+
+    def _seed(self, z, y, x, busy, replace=None):
         st = self.state
         val = float(st.vol.data[z, y, x])
         mode = self.seg_mode.currentData()
@@ -962,8 +971,10 @@ class VRWindow(QMainWindow):
             seg = None
             if mask is not None:
                 sub, off = mask
-                seg = busy.run("Building the 3D surface...", Segment, self.seg_name.text() or "Segment", sub, off,
-                               st.vol.shape, self.seg_color, st.vol.spacing)
+                name, color = (replace.name, replace.color) if replace else (self.seg_name.text() or "Segment",
+                                                                             self.seg_color)
+                seg = busy.run("Building the 3D surface...", Segment, name, sub, off,
+                               st.vol.shape, color, st.vol.spacing)
         finally:
             self.unsetCursor()
         busy.hide()
@@ -971,6 +982,17 @@ class VRWindow(QMainWindow):
             QMessageBox.information(self, "Empty", "No voxels were segmented.")
             return
         seg.range = (lo, hi)
+        seg.seed = (z, y, x)
+        if replace is not None and replace in st.segments:
+            seg.visible, seg.opacity = replace.visible, replace.opacity
+            st.segments[st.segments.index(replace)] = seg
+            st.active_segment = seg
+            self._refresh_seg_list(select=seg)
+            self.vr.sync_segments()
+            self.segmentsChanged.emit(st)
+            self.statusBar().showMessage(f"Segment '{seg.name}' re-grown: {seg.volume_ml:.2f} ml "
+                                         f"({lo:.0f}…{hi:.0f})", 8000)
+            return
         self._add_segment(seg)
         self.tabs.setCurrentIndex(1)
         if seg.volume_ml > 300:
@@ -997,6 +1019,7 @@ class VRWindow(QMainWindow):
         seg = self.state.active_segment
         if seg is None:
             return
+        seg.seed = None             # re-growing would throw the brush strokes away
         seg.rebuild()
         self.vr.sync_segments()
         self._refresh_seg_list(select=seg)

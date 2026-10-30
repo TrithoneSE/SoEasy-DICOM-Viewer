@@ -16,8 +16,18 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/3d-cinematic.gif" width="640" alt="3D snapshot movie: the skull opens to show a segmented tumour and the arteries around it">
+  <a href="https://github.com/TrithoneSE/SoEasy-DICOM-Viewer/releases/latest"><img alt="Download for Windows" src="https://img.shields.io/badge/%E2%AC%87%20Download-Windows-0a5bd3?style=for-the-badge"></a>
+  &nbsp;
+  <a href="https://trithonese.github.io/SoEasy-DICOM-Web/"><img alt="Open the web version" src="https://img.shields.io/badge/%E2%96%B6%20Web%20version-iPad%20%7C%20iPhone%20%7C%20browser-2ea44f?style=for-the-badge"></a>
 </p>
+
+<p align="center">
+  <img src="docs/media/3d-cinematic.gif" width="640" alt="3D snapshot movie: the skull turns and opens to show a segmented tumour and the arteries around it">
+</p>
+
+> **On an iPad, iPhone or a computer without Windows?** Use **[SoEasy DICOM Web](https://trithonese.github.io/SoEasy-DICOM-Web/)**,
+> the browser version of this viewer — 2D, cine, DSA, MPR, reference lines and colour 3D, nothing to install, images
+> never uploaded. See [Web version](#web-version) for what each version can do.
 
 > **Not a medical device.** SoEasy DICOM Viewer is a visualisation tool for education, research and personal use.
 > It is not certified for diagnosis or treatment decisions. Always rely on the original images and the radiologist's
@@ -30,6 +40,7 @@
 - [Highlights](#highlights)
 - [Screenshots](#screenshots)
 - [Download and install](#download-and-install)
+- [Web version](#web-version)
 - [System requirements](#system-requirements)
 - [Getting started](#getting-started)
 - [Features in detail](#features-in-detail)
@@ -97,6 +108,31 @@ Download the latest version from the [**Releases**](../../releases) page:
 The installer is not code-signed yet, so Windows SmartScreen may show *Windows protected your PC*: choose
 *More info → Run anyway*. Colour presets and settings are kept in `%APPDATA%\DicomColorViewer` and survive updates
 and uninstalling.
+
+## Web version
+
+**[SoEasy DICOM Web](https://trithonese.github.io/SoEasy-DICOM-Web/)** is the browser version of this viewer for
+iPad, iPhone, Android, Mac and Linux — and for any Windows PC where you cannot install software. Open the link; on
+iPad / iPhone choose *Share → Add to Home Screen* to use it full-screen and offline. All processing stays on the
+device; images are never uploaded. Its repository is
+[TrithoneSE/SoEasy-DICOM-Web](https://github.com/TrithoneSE/SoEasy-DICOM-Web).
+
+Colour presets are the same .json files in both: export a preset here and import it in the web version, or the
+other way round.
+
+| | Desktop (this app) | [Web](https://trithonese.github.io/SoEasy-DICOM-Web/) |
+|---|:---:|:---:|
+| Runs on | Windows 10 / 11 | any modern browser, iPad, iPhone |
+| 2D, presets, MIP / MinIP slabs, cine | ✅ | ✅ |
+| DSA with automatic pixel shift | ✅ | ✅ |
+| Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
+| MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
+| Measurements | all 2D and 3D tools | length |
+| Segmentation, STL, 3D movies | ✅ | — |
+| DTI, fusion, anonymous display | ✅ | — |
+| Archives | .zip, .rar, .7z, .tar | .zip |
+
+The full comparison is in the [SoEasy DICOM Web README](https://github.com/TrithoneSE/SoEasy-DICOM-Web#web-or-desktop).
 
 ## System requirements
 
@@ -171,8 +207,11 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 
 ### Segmentation
 - Ctrl+click a lesion in 2D (or use *Seed*): the region grows from the click with a range from the local statistics
-  (or a tolerance, a manual range, or the range of a colour curve), on a lightly smoothed copy so CT noise does not
-  break it apart, limited to the crop box if wanted, with an anti-leak setting.
+  (or a tolerance, a manual range, or the range of a colour curve), limited to the crop box if wanted, with an
+  anti-leak setting.
+- *Smooth noise first* (off by default) grows on a lightly smoothed copy so CT noise does not break a lesion apart;
+  leave it off for thin structures such as small vessels. Toggling it re-grows the selected segment from its click
+  straight away, so you can compare both results (not after brush edits, which re-growing would discard).
 - Result: a smooth 3D surface with its volume in ml; brush (B) to add or erase in 2D; STL export.
 
 ### DSA (digital subtraction angiography)
