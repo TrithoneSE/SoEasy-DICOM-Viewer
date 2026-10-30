@@ -130,7 +130,8 @@ other way round.
 | Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
 | MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
 | Measurements | all 2D and 3D tools | length |
-| Segmentation, STL, 3D movies, collage | ✅ | — |
+| Collage | ✅ | ✅ |
+| Segmentation, STL, 3D movies | ✅ | — |
 | DTI, fusion, anonymous display | ✅ | — |
 | Archives | .zip, .rar, .7z, .tar | .zip |
 
