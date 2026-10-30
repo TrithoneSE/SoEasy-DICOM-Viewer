@@ -13,7 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = [
     "test_3d_measure", "test_scalpel_loading", "test_units_archive", "test_main_ui", "test_vr_ui", "test_mpr_ui",
     "test_dti_fusion_ui", "test_drag_series", "test_open_window_tf", "test_captions_snapshots",
-    "test_reformats_rim_cursor", "test_dsa", "test_reference_lines",
+    "test_reformats_rim_cursor", "test_dsa", "test_reference_lines", "test_collage",
 ]
 
 

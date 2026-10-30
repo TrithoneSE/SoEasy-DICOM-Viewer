@@ -530,6 +530,9 @@ class MainWindow(QMainWindow):
                               "fusion")
         self.act_dti = act("DTI", "DTI / tractography...", self.open_dti, "Ctrl+D",
                            "Diffusion tensor: FA / MD / color FA maps and tractography from a DWI series", "dti")
+        self.act_collage = act("Collage", "Collage...", self._collage, "Ctrl+G",
+                               "Collage: the active series on one 5 × 5 / 4 × 4 / 4 × 3 image, one slice every 5 mm",
+                               "collage")
         self.act_tags = act("Tags", "DICOM tags...", self._dicom_tags, "Ctrl+T", None, "tags")
         self.act_help = act("Help", "Quick guide", self._help, "F1", "Mouse buttons, tools and shortcuts", "help")
 
@@ -619,7 +622,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_dsa)
         tb.widgetForAction(self.act_dsa).setPopupMode(QToolButton.MenuButtonPopup)   # click = on / off, ▾ = tools
         tb.addSeparator()
-        for a in (self.act_mpr, self.act_3d, self.act_fusion, self.act_dti):
+        for a in (self.act_mpr, self.act_3d, self.act_fusion, self.act_dti, self.act_collage):
             tb.addAction(a)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -697,6 +700,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(self._act("Save viewport image...", self._save_image, "Ctrl+S"))
         m.addAction(self._act("Copy viewport image", self._copy_image, "Ctrl+Shift+C"))
+        m.addAction(self.act_collage)
         m.addAction(self.act_tags)
         m.addSeparator()
         m.addAction(self._act("Exit", self.close))
@@ -1675,6 +1679,15 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setImage(s.grab().toImage())
             self.statusBar().showMessage("Image copied to the clipboard.", 3000)
 
+    def _collage(self):
+        s = self._active_slice()
+        if s is None:
+            return
+        from .collage import CollageDialog
+        dlg = CollageDialog(self, s)
+        dlg.resize(760, 760)
+        dlg.exec()
+
     def _dicom_tags(self):
         s = self._active_slice()
         st = self._active_state()
@@ -1754,7 +1767,8 @@ class MainWindow(QMainWindow):
             "SHORTCUTS: W W/L • M pan • Z zoom • S browse • L length • E ellipse • U rectangle • G polygon\n"
             "  O open polygon • A angle • C Cobb • D deviation • Y arrow • P pencil • T text\n"
             "  Q 3D cursor • K color picker • B brush • J seed • R W/L ROI • I invert • 0 auto W/L\n"
-            "  1–9 window presets • X crosshair • Ctrl+L link • Ctrl+Shift+L reference lines • Ctrl+T DICOM tags\n\n"
+            "  1–9 window presets • X crosshair • Ctrl+L link • Ctrl+Shift+L reference lines • Ctrl+T DICOM tags\n"
+            "  Ctrl+G collage: the series on one 5×5 / 4×4 / 4×3 image, one slice every 5 mm, centred\n\n"
             "Note: a personal visualisation aid, not a certified diagnostic device."))
 
 

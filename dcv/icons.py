@@ -79,6 +79,8 @@ SVG = {
     "help": '<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 1-1 1.7"/>'
             + _DOT.format(12, 16.8),
     "tags": '<path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>',
+    "collage": '<rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>'
+               '<circle cx="12" cy="12" r="1.6"/>',
     "trash": '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 13h10l1-13"/>',
     # 3D window
     "eye": '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',

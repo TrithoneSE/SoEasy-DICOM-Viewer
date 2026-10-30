@@ -61,6 +61,8 @@
   about 1 GB of RAM.
 - **2D viewing** with free window / level, presets, measurements (length, angle, Cobb, ellipse, rectangle, polygon,
   text…), MIP / MinIP slabs, filters, colour maps and a layout of up to 5 × 5 viewports.
+- **Collage** — a series as one 5 × 5, 4 × 4 or 4 × 3 image in one click, one slice every 5 mm (or any interval),
+  centred in the series and movable with a slider; thick-slice series keep all their slices.
 - **Reference lines** between viewports — an axial, a sagittal and a coronal series side by side show where each
   other's slices cut them, follow every scroll and can be dragged like MPR axes; handy for MRI sequences that cover
   only part of the head.
@@ -128,7 +130,7 @@ other way round.
 | Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
 | MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
 | Measurements | all 2D and 3D tools | length |
-| Segmentation, STL, 3D movies | ✅ | — |
+| Segmentation, STL, 3D movies, collage | ✅ | — |
 | DTI, fusion, anonymous display | ✅ | — |
 | Archives | .zip, .rar, .7z, .tar | .zip |
 
@@ -184,6 +186,14 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 - Measurements: length, angle, Cobb angle, open / closed polygon, ellipse and rectangle ROIs (area, mean, SD,
   min / max), arrow, pencil, text and deviation. Lengths are shown in mm below 1 cm and in cm above. Captions can be
   dragged out of the way. ABC/2 volume calculator.
+- **Collage** (toolbar *Collage*, *File → Collage…*, Ctrl+G): the active viewport's series as one image of 5 × 5,
+  4 × 4, 4 × 3, 3 × 3 or any number of columns × rows, one slice every 5 mm by default (any interval can be set).
+  The run of slices starts **centred** in the series — e.g. images 50–242 of a 292-slice 0.625 mm CT at 5 × 5 — so
+  it covers the middle of the head rather than stopping short of the vertex; the *Position* slider (or *from*) moves
+  it and *Centre* puts it back. When the slices are already that far apart and fit — a CT of 29 thick slices, an MRI
+  of 20 — every slice is used. Tiles look exactly like the viewport (window / level, colour map, filter, slab,
+  rotation, segments), with a header (series, plane, interval, window) and each image's number and position. Save
+  writes a PNG / JPEG; Copy puts it on the clipboard.
 
 ### MPR
 - Three orthogonal planes with draggable axes; drag a circle handle to tilt a plane (oblique MPR), drag the centre to
@@ -246,7 +256,7 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 | / , Shift+/ , Ctrl+Shift+/ , Shift+M | DSA on / off, displayed frame as mask, reset mask, manual pixel shift |
 | Ctrl+L, Ctrl+Shift+L, X, F, F11 | synchronise slices, reference lines, crosshair, maximise viewport, full screen |
 | Ctrl+Shift+H | hide patient identity on screen |
-| Ctrl+S, Ctrl+Shift+C, Ctrl+T | save image, copy image, DICOM tags |
+| Ctrl+S, Ctrl+Shift+C, Ctrl+G, Ctrl+T | save image, copy image, collage, DICOM tags |
 | F1 | quick guide (every window has its own) |
 
 ## Privacy
@@ -292,6 +302,7 @@ dcv/
   main_window.py        main window, series list, layouts, menus
   slice_view.py         2D viewport: tools, measurements, DSA, cine
   measure.py            2D measurements
+  collage.py            collage of a series as one 5 × 5 / 4 × 4 / 4 × 3 image
   mpr_window.py         MPR window
   vr_window.py          3D window: curve editor, segmentation, snapshots
   volume_view.py        3D rendering, crop, scalpel, 3D measurements
