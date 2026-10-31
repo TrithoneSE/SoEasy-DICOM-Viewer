@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget  # noqa: E402
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor  # noqa: E402
 
 from .measure import fmt_len  # noqa: E402
-from .segment import BONE_OFFSET, np_to_vtk_image  # noqa: E402
+from .segment import BONE_OFFSET, VEIN_OFFSET, np_to_vtk_image  # noqa: E402
 from .tf_model import combine  # noqa: E402
 
 # 3D measurement tools (same names / shortcuts as the 2D tools; ROI tools need a flat plane, so they are 2D only)
@@ -281,6 +281,8 @@ class VolumeView(QWidget):
             w, h = self.rw.GetSize()
             d = math.degrees(math.atan2(y - h / 2, x - w / 2) - math.atan2(y0 - h / 2, x0 - w / 2))
             self.roll_view((d + 180) % 360 - 180)
+        elif self.rotate_mode == "pan":
+            self.pan_view(x0, y0, x, y)
         else:
             self.turn_view((x - x0) * 0.5)
         self.iren.GetCommand(self._r_obs["MouseMoveEvent"]).SetAbortFlag(1)
@@ -293,6 +295,26 @@ class VolumeView(QWidget):
         self.iren.GetCommand(self._r_obs["LeftButtonReleaseEvent"]).SetAbortFlag(1)
         self.render()
 
+    def pan_view(self, x0, y0, x1, y1):
+        """Move the camera so the point under (x0, y0) follows the mouse to (x1, y1)."""
+        ren = self.renderer
+        cam = ren.GetActiveCamera()
+        f = np.array(cam.GetFocalPoint(), float)
+        ren.SetWorldPoint(*f, 1.0)
+        ren.WorldToDisplay()
+        z = ren.GetDisplayPoint()[2]
+        pts = []
+        for px, py in ((x0, y0), (x1, y1)):
+            ren.SetDisplayPoint(px, py, z)
+            ren.DisplayToWorld()
+            w = ren.GetWorldPoint()
+            pts.append(np.array(w[:3], float) / (w[3] or 1.0))
+        d = pts[0] - pts[1]
+        cam.SetFocalPoint(*(f + d))
+        cam.SetPosition(*(np.array(cam.GetPosition(), float) + d))
+        ren.ResetCameraClippingRange()
+        self.render()
+
     def set_rotate_mode(self, mode):
         self.rotate_mode = mode
         self.update_cursor()
@@ -300,7 +322,7 @@ class VolumeView(QWidget):
     def _mode_cursor(self):
         if self.scalpel is not None:
             return QCursor(Qt.CrossCursor)
-        name = {"free": "orbit", "roll": "roll", "turn": "turn"}.get(self.rotate_mode, "orbit")
+        name = {"free": "orbit", "roll": "roll", "turn": "turn", "pan": "pan"}.get(self.rotate_mode, "orbit")
         if name not in self._cursors:
             from .icons import icon
             pm = QPixmap(30, 30)
@@ -504,19 +526,17 @@ class VolumeView(QWidget):
             return
         lo, hi = self.vol.value_range
         bone = self.state.bone_encoded
+        vein = self.state.vein_encoded
         vr = blend == "composite"
         # One regular ~1 HU grid over the whole stored range: [lo, hi] = non-bone curves; with the bone lock the bone
         # area is stored mirrored as -OFF - HU (bone curves only), with a transparent gap between the two domains.
         # Sent to VTK in one call each: adding thousands of points one by one cost ~0.25 s per curve drag step.
-        x0, x1 = (-BONE_OFFSET - hi if bone else lo), hi
+        x0, x1 = (-BONE_OFFSET - hi if bone else lo), (VEIN_OFFSET + 3000 if vein else hi)
         n = int(np.clip(x1 - x0 + 1, 1024, 32768))
         xs = np.linspace(x0, x1, n)
         alpha = np.zeros(n)
         rgb = np.zeros((n, 3))
-        domains = [(xs >= lo, xs, "normal" if bone else None)]
-        if bone:
-            domains.append((xs <= -BONE_OFFSET - lo, -BONE_OFFSET - xs, "bone"))
-        for sel, hu, layer in domains:
+        for sel, hu, layer in self._domains(xs, lo, bone, vein):
             a, c = combine(tf.curve_samples(hu[sel], layer), int(sel.sum()), fill_black=not vr)
             alpha[sel] = np.clip(a * gain, 0, 1)
             rgb[sel] = c
@@ -525,7 +545,7 @@ class VolumeView(QWidget):
         self.ctf.BuildFunctionFromTable(float(x0), float(x1), n, np.ascontiguousarray(rgb.ravel()))
         self.otf.BuildFunctionFromTable(float(x0), float(x1), n, np.ascontiguousarray(alpha))
         if vr and any(c.hide_edges for c in tf.curves):
-            self.prop.SetTransferFunction2D(self._tf2d(tf, gain, lo, bone, 2048 if fast else 8192))
+            self.prop.SetTransferFunction2D(self._tf2d(tf, gain, lo, bone, vein, 2048 if fast else 8192))
             self.prop.SetTransferFunctionModeTo2D()
         else:
             self.prop.SetTransferFunctionModeTo1D()
@@ -546,7 +566,18 @@ class VolumeView(QWidget):
         self._text.SetInput(f"{self.vol.description}   [{mode}]")
         self.render()
 
-    def _tf2d(self, tf, gain, lo, bone, max_width=8192):
+    @staticmethod
+    def _domains(xs, lo, bone, vein):
+        """(selection of the value axis, HU there, curve layers) of each domain of the stored data."""
+        layers = ("normal",) if vein and bone else ("normal", "bone") if vein else ("normal", "vein") if bone else None
+        out = [((xs >= lo) & (xs <= VEIN_OFFSET - 1000), xs, layers)]
+        if vein:
+            out.append((xs >= VEIN_OFFSET, xs - VEIN_OFFSET, ("vein",)))
+        if bone:
+            out.append((xs <= -BONE_OFFSET - lo, -BONE_OFFSET - xs, ("bone",)))
+        return out
+
+    def _tf2d(self, tf, gain, lo, bone, vein, max_width=8192):
         """2D transfer function (x = voxel value, y = gradient magnitude) for curves with hide_edges: they fade out
         where the gradient is above tf.edge_threshold, i.e. on the partial-volume rim of brighter structures.
         Axes as in VTK 9.7's shader: x = (value - min) / range of the rendered data; y = central-difference gradient
@@ -559,9 +590,7 @@ class VolumeView(QWidget):
         t = np.clip((grad - 0.6 * tf.edge_threshold) / (0.8 * tf.edge_threshold), 0, 1)
         keep = 1.0 - t * t * (3 - 2 * t)                          # smoothstep from 0.6·T to 1.4·T
         rgba = np.zeros((H, W, 4), np.float32)
-        domains = [(xs >= lo, xs, "normal" if bone else None)]
-        if bone:
-            domains.append((xs <= -BONE_OFFSET - lo, -BONE_OFFSET - xs, "bone"))
+        domains = self._domains(xs, lo, bone, vein)
         # only rows in the threshold's transition differ: below it every row keeps the curves, above it every row
         # hides them -> merge once per distinct factor and copy (keeps curve dragging smooth)
         levels, row_of = np.unique(np.round(keep, 3), return_inverse=True)

@@ -178,7 +178,7 @@ def run3d():
 
     # 5) arteries / veins preset: two separate vessel curves
     av = next(t for t in tf_model.builtin_presets() if "Arteries / Veins" in t.name)
-    names = [c.name for c in av.curves if c.layer == "normal"]
+    names = [c.name for c in av.curves if c.layer != "bone"]
     check(names == ["Veins", "Arteries"], f"arteries / veins preset curves: {names}")
     vw.set_tf(av)
     vw.apply_tf()

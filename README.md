@@ -70,7 +70,8 @@
 - **Colour 3D volume rendering** with an interactive curve editor: tissue colours and opacity drawn as curves over
   the histogram, a **bone colour lock** that keeps bone in bone colours, and a **rim filter** that separates an
   enhancing tumour from the walls of contrast-filled vessels.
-- **Segmentation** — click a lesion, get a 3D surface and its volume in ml; refine with a brush; export STL.
+- **Segmentation** — click a lesion, get a 3D surface and its volume in ml; tune what enters it with two handles
+  over its histogram, refine with a brush; export STL.
 - **3D tools** — crop box, scalpel, 3D measurements, snapshots and fly-through movies (animated GIF).
 - **DSA** for X-ray angiography runs: mask from the scanner or any frame, manual and automatic pixel shift, cine at
   the run's own frame rate.
@@ -116,7 +117,7 @@ and uninstalling.
 **[SoEasy DICOM Web](https://trithonese.github.io/SoEasy-DICOM-Web/)** is the browser version of this viewer for
 iPad, iPhone, Android, Mac and Linux — and for any Windows PC where you cannot install software. Open the link; on
 iPad / iPhone choose *Share → Add to Home Screen* to use it full-screen and offline. All processing stays on the
-device; images are never uploaded. Its repository is
+device; images are never uploaded. Its source is in [`web/`](web) of this repository; the built site is published to
 [TrithoneSE/SoEasy-DICOM-Web](https://github.com/TrithoneSE/SoEasy-DICOM-Web).
 
 Colour presets are the same .json files in both: export a preset here and import it in the web version, or the
@@ -129,13 +130,14 @@ other way round.
 | DSA with automatic pixel shift | ✅ | ✅ |
 | Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
 | MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
-| Measurements | all 2D and 3D tools | length |
+| Measurements | all 2D and 3D tools | 2D length, angle, Cobb, ellipse ROI; 3D length |
 | Collage | ✅ | ✅ |
-| Segmentation, STL, 3D movies | ✅ | — |
+| Seed segmentation with range editor | ✅ | ✅ |
+| STL, brush, 3D movies | ✅ | — |
 | DTI, fusion, anonymous display | ✅ | — |
 | Archives | .zip, .rar, .7z, .tar | .zip |
 
-The full comparison is in the [SoEasy DICOM Web README](https://github.com/TrithoneSE/SoEasy-DICOM-Web#web-or-desktop).
+The web version's details are in [`web/README.md`](web/README.md).
 
 ## System requirements
 
@@ -187,7 +189,8 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
 - Measurements: length, angle, Cobb angle, open / closed polygon, ellipse and rectangle ROIs (area, mean, SD,
   min / max), arrow, pencil, text and deviation. Lengths are shown in mm below 1 cm and in cm above. Captions can be
   dragged out of the way. ABC/2 volume calculator.
-- **Collage** (toolbar *Collage*, *File → Collage…*, Ctrl+G): the active viewport's series as one image of 5 × 5,
+- **Collage** (toolbar *Collage*, *File → Collage…*, Ctrl+G): the active viewport's series, in the axial, coronal or
+  sagittal plane (a thin-slice series gives sharp reformats, like MPR), as one image of 5 × 5,
   4 × 4, 4 × 3, 3 × 3 or any number of columns × rows, one slice every 5 mm by default (any interval can be set).
   The run of slices starts **centred** in the series — e.g. images 50–242 of a 292-slice 0.625 mm CT at 5 × 5 — so
   it covers the middle of the head rather than stopping short of the vertex; the *Position* slider (or *from*) moves
@@ -206,12 +209,16 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
   presets (bone, CT angiography with arteries / veins, skin, muscle, enhancing lesion, lung), your own presets, and a
   colour picker that creates a curve from a tissue you click in 2D.
 - **Bone colour lock**: the bone area is coloured only by bone curves, so vessels or a tumour with the same HU as the
-  edge of bone keep their own colour.
+  edge of bone keep their own colour. Bone is told from vessels by density, not by one threshold: an artery or an
+  aneurysm above 500 HU on a CTA stays a vessel, even touching bone.
+- **Arteries and veins** (preset *CT Angio - Arteries / Veins*): on an arterial-phase CTA, arteries are the bright
+  vessels and what connects to them, so a small branch is not painted as a vein and an artery has no blue rim. On a
+  late phase both are equally bright and cannot be separated.
 - **Rim filter**: curves marked *hide partial-volume rims* colour only homogeneous tissue, using a value × gradient
   transfer function, so an enhancing tumour is not confused with the walls of contrast-filled vessels. The *Rim
   threshold* slider sets how strict it is.
 - Crop box, scalpel (cut inside / outside a drawn area, undo), inspect (click = HU and colour), orientation cube,
-  standard views, free rotate / roll / turn.
+  standard views, free rotate / roll / turn / pan.
 - 3D measurements: length, angle, Cobb, open polygon, arrow and text placed on the rendered surface.
 - **Snapshots and movies**: save views (camera, crop, colours), jump between them, and render a smooth fly-through as
   an animated GIF or PNG sequence.

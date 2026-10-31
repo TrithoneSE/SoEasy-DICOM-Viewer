@@ -8,6 +8,10 @@ from vtkmodules.util import numpy_support
 
 
 BONE_OFFSET = 10000
+VEIN_OFFSET = 20000     # veins are stored as VEIN_OFFSET + HU, far above the normal domain (see update_render_data)
+BONE_CORE_HU = 1000.0   # cortical bone; contrast in vessels stays well below it (real CTA: arteries ~590, max ~800)
+VEIN_MIN_HU = 110.0
+ARTERY_TOP_HU = 450.0
 
 
 def free_ram_mb():
@@ -86,6 +90,92 @@ def _morph(mask_u8, spacing, radius, erode):
     radii = (int(round(radius * spacing[2] / spacing[0])), radius, radius)
     out = box_erode(mask_u8, radii) if erode else box_dilate(mask_u8, radii)
     return out.astype(np.uint8)
+
+
+def label_regions(mask, spacing):
+    """Connected regions of a boolean mask: uint16 labels (0 = background, 1 = largest, ...)."""
+    conn = vtk.vtkImageConnectivityFilter()
+    conn.SetInputData(np_to_vtk_image(mask.astype(np.uint8), spacing))
+    conn.SetScalarRange(1, 1)
+    conn.SetExtractionModeToAllRegions()
+    conn.SetLabelModeToSizeRank()
+    conn.SetLabelScalarTypeToUnsignedShort()
+    conn.Update()
+    return vtk_image_to_np(conn.GetOutput(), mask.shape).copy()
+
+
+def _vessels_by_pieces(data, spacing, high, core, core_share=0.15, thin_mm3=20.0):
+    """A 1 mm erosion cuts the thin contacts between arteries and the skull base; then a piece of bone has much of its
+    volume above cortical density (real CTA: 80-99 %) and a vessel almost none (0 %). What the erosion removed goes back
+    to its piece; leftovers are bone when dense, or when they are small slivers touching bone."""
+    radii = tuple(max(1, r) for r in mm_to_radii(1.0, spacing))
+    eroded = box_erode(high, radii)
+    lab = label_regions(eroded, spacing)
+    n = int(lab.max()) + 1
+    size, dense = np.bincount(lab.ravel(), minlength=n), np.bincount(lab[core], minlength=n)
+    is_bone = dense >= np.maximum(20, core_share * size)
+    is_bone[0] = False
+    bone = box_dilate(is_bone[lab], tuple(r + 1 for r in radii)) & high
+    rest = high & ~bone
+    lab = label_regions(rest, spacing)
+    n = int(lab.max()) + 1
+    size, dense = np.bincount(lab.ravel(), minlength=n), np.bincount(lab[core], minlength=n)
+    touches = np.bincount(lab[box_dilate(bone, (1, 1, 1))], minlength=n) > 0
+    thick = np.bincount(lab[eroded], minlength=n) > 0
+    small = size * float(np.prod(spacing)) <= thin_mm3
+    is_bone = (dense >= np.maximum(3, core_share * size)) | (touches & small & ~thick)
+    is_bone[0] = False
+    return rest & ~is_bone[lab]
+
+
+def _vessels_away_from_bone(data, spacing, high, core, reach_mm=4.0, far_share=0.2):
+    """For a vessel in broad contact with bone, which no erosion separates (a carotid entering its canal, an aneurysm on
+    the clinoid): take away dense bone and its partial-volume edge; what remains is a vessel when it is thick (thin plates
+    of bone are not) and runs away from dense bone (a diploe or spongy island lies within reach_mm of it)."""
+    rc = mm_to_radii(1.5, spacing)
+    solid = box_erode(box_dilate(core, rc), rc) | core
+    rest = high & ~box_dilate(solid, tuple(max(1, r) + 1 for r in mm_to_radii(1.0, spacing)))
+    lab = label_regions(rest, spacing)
+    n = int(lab.max()) + 1
+    size = np.bincount(lab.ravel(), minlength=n)
+    thick = np.bincount(lab[box_erode(rest, (1, 1, 1))], minlength=n) >= 3
+    far = np.bincount(lab[~box_dilate(solid, mm_to_radii(reach_mm, spacing))], minlength=n)
+    is_vessel = thick & (far >= far_share * size)
+    is_vessel[0] = False
+    return is_vessel[lab]
+
+
+def bone_and_vessels(data, spacing, hu):
+    """(bone, bright vessels) among the voxels >= hu. One HU threshold cannot tell them apart on a CTA: contrast in a
+    large artery or an aneurysm can pass 500 HU (real CTA: arteries ~590, max ~800; bone 1250-1650). Density can."""
+    high = data >= hu
+    core = data >= max(BONE_CORE_HU, hu + 200.0)
+    vessels = _vessels_by_pieces(data, spacing, high, core) | _vessels_away_from_bone(data, spacing, high, core)
+    return high & ~vessels, vessels
+
+
+def artery_threshold(data, region_free):
+    """Auto arterial core (HU): 60 % of the bright end of the soft-tissue side of the scan, within sane limits."""
+    v = data[region_free & (data >= 150)]
+    if v.size < 100:
+        return 300.0
+    return float(np.clip(0.6 * np.percentile(v, 90), 180, 500))
+
+
+def classify_arteries(data, spacing, region_free, core_hu):
+    """Boolean artery mask: voxels >= core_hu, grown through >= 0.55 core_hu voxels connected to them (arterial tree),
+    then 3 mm further through >= 110 HU (small distal branches), then one voxel for the partial-volume wall. On a late
+    phase veins are as bright as arteries and connected: HU and connectivity cannot separate them there."""
+    low = (data >= 0.55 * core_hu) & region_free
+    lab = label_regions(low, spacing)
+    n = int(lab.max()) + 1
+    keep = np.bincount(lab[(data >= core_hu) & region_free], minlength=n) > 0
+    keep[0] = False
+    art = keep[lab]
+    faint = (data >= 110) & region_free
+    for _ in range(max(1, int(round(3.0 / min(spacing))))):
+        art = box_dilate(art, (1, 1, 1)) & (faint | art)
+    return box_dilate(art, (1, 1, 1)) & region_free
 
 
 def _connected(mask_u8, spacing, seed_zyx):
@@ -385,6 +475,14 @@ class VolumeState:
         self._bone_region = None
         self._bone_key = None
         self.encode_bone = False        # set by the 3D window (composite VR only)
+        self.encode_veins = False       # set by the 3D window: the curves include a Veins layer
+        self.artery_hu = None           # None = automatic (artery_threshold)
+        self._artery_mask = None
+        self._artery_key = None
+        self._vein_mask = None
+        self._vein_key = None
+        self.artery_hu_used = None
+        self._bright_vessels = None
         self.render_data = None         # 3D copy (scalpel + edge cleaning + bone lock), possibly half resolution
         self.render_factor = None       # None = automatic, 1 = full, 2 = half
         self._auto_factor = None
@@ -401,12 +499,44 @@ class VolumeState:
         key = (self.bone_lock_hu, self.bone_close_mm, self.bone_rim_mm)
         if self._bone_key != key:
             sp = self.vol.spacing
-            bone = self.vol.data >= self.bone_lock_hu
+            bone, vessels = bone_and_vessels(self.vol.data, sp, self.bone_lock_hu)
             rc = mm_to_radii(self.bone_close_mm, sp)
             closed = box_erode(box_dilate(bone, rc), rc) | bone      # fill the diploe / spongy bone
-            self._bone_region = box_dilate(closed, mm_to_radii(self.bone_rim_mm, sp))
+            region = box_dilate(closed, mm_to_radii(self.bone_rim_mm, sp))
+            # a bright vessel and its wall stay out of the bone area, even right next to bone
+            self._bone_region = region & ~(box_dilate(vessels, tuple(max(1, r) for r in mm_to_radii(1.0, sp))) & ~bone)
             self._bone_key = key
         return self._bone_region
+
+    # artery / vein separation -------------------------------------------------
+    def artery_mask(self):
+        region = self.bone_region()
+        free = np.ones(self.vol.shape, bool) if region is None else ~region
+        key = (self._bone_key if region is not None else None, self.artery_hu)
+        if self._artery_key != key:
+            core = self.artery_hu or artery_threshold(self.vol.data, free)
+            self.artery_hu_used = core
+            self._artery_mask = classify_arteries(self.vol.data, self.vol.spacing, free, core)
+            self._artery_key = key
+        return self._artery_mask
+
+    def vein_mask(self):
+        """Other vessels: >= VEIN_MIN_HU outside the arteries, away from bone (its partial-volume edge) and in pieces of
+        at least 30 mm3 (brain noise and enhancing dura are specks)."""
+        arteries = self.artery_mask()
+        key = self._artery_key
+        if self._vein_key != key:
+            sp = self.vol.spacing
+            region = self.bone_region()
+            m = (self.vol.data >= VEIN_MIN_HU) & ~arteries
+            if region is not None:
+                m &= ~box_dilate(region, mm_to_radii(2.0, sp))
+            lab = label_regions(m, sp)
+            size = np.bincount(lab.ravel())
+            big = size * float(np.prod(sp)) >= 30.0
+            big[0] = False
+            self._vein_mask, self._vein_key = big[lab], key
+        return self._vein_mask
 
     # bone-edge clean-up (partial volume) --------------------------------------
     def clean_mask(self):
@@ -474,17 +604,35 @@ class VolumeState:
             # only through bone-domain values BELOW the edge HU and air values (transparent). A plain shift would
             # pass through the dense-bone part of the bone curve and leave a speckled dark shell at the edge.
             self.render_data[br] = -BONE_OFFSET - np.minimum(self.render_data[br], 32767 - BONE_OFFSET - 1)
+        if self.vein_encoded:
+            # vessels that are not arteries go to their own domain, so only vein curves color them and the partial
+            # volume wall of an artery (which passes through vein HU) is not painted as a vein
+            # Stored above the normal domain, not between it and the bone domain: there every bone surface would
+            # cross the vein values and get blue specks. A vein surface crosses the arteries' range instead; clamping
+            # that range (ARTERY_TOP_HU) and the large offset make the crossing ~2 % of a voxel.
+            arteries = self.artery_mask()[:, ::f, ::f]
+            veins = self.vein_mask()[:, ::f, ::f]
+            d = self.render_data
+            other = (d >= VEIN_MIN_HU) & ~arteries
+            d[d > ARTERY_TOP_HU] = ARTERY_TOP_HU
+            d[other] = VEIN_MIN_HU - 1            # neither (brain noise, bone edge): transparent in the normal domain
+            d[veins] = VEIN_OFFSET + np.minimum(src[veins], 3000)
         if self.removed is not None:
             self.render_data[self.removed[:, ::f, ::f].astype(bool)] = lo
         self.version += 1
+
+    @property
+    def vein_encoded(self):
+        return bool(self.encode_veins) and self.vol.modality == "CT"
 
     def release_3d(self):
         """Free the 3D-only buffers (copy of the volume, bone area, edge mask) when no 3D window uses them."""
         self.render_data = None
         self._bone_region = self._bone_key = None
+        self._artery_mask = self._artery_key = self._vein_mask = self._vein_key = None
         self._clean_mask = self._clean_key = None
         self._csrc = self._csrc_key = None
-        self.encode_bone = False
+        self.encode_bone = self.encode_veins = False
         self.version += 1
 
     def has_user_work(self):

@@ -896,6 +896,7 @@ class MainWindow(QMainWindow):
             try:
                 def prepare():                    # the slow part of opening 3D, off the GUI thread
                     state.encode_bone = state.bone_lock
+                    state.encode_veins = any(c.layer == "vein" for c in state.tf.curves)
                     if state.encode_bone:
                         state.bone_region()
                     state.update_render_data()

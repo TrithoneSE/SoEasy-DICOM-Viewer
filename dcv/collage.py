@@ -2,9 +2,12 @@
 viewport, one slice every N mm (5 mm by default). The run of slices starts centred in the series — the middle of a
 head, not the first slices below the skull base — and a slider moves it. A series whose slices are already that far
 apart (a thick CT of 29 slices, an MRI of 20) keeps every slice. Tiles are rendered by the viewport itself, so window /
-level, colour map, filters, slabs, rotation and segments look exactly as on screen."""
+level, colour map, filters, slabs, rotation and segments look exactly as on screen. Any patient plane can be chosen:
+a thin-slice series gives sharp coronal / sagittal reformats, like MPR."""
 
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 import numpy as np
 from PySide6.QtCore import QRectF, Qt
@@ -49,21 +52,40 @@ def is_movie(view):
     return view.vol.frame_time is not None and view.orientation == "axial"
 
 
-def render_collage(view, indices, cols, rows, tile_w=384, labels=True, title=""):
-    """One QImage of cols × rows tiles (the first cols × rows of `indices`)."""
+@contextmanager
+def in_plane(view, orientation):
+    """The viewport set to another reconstruction for a moment, without touching what it shows."""
+    saved = view.orientation, view.index, view.rot, view.flip_h, view.flip_v, view._img
+    if orientation != view.orientation:
+        view.orientation, view.rot, view.flip_h, view.flip_v = orientation, 0, False, False
+    try:
+        yield view
+    finally:
+        view.orientation, view.index, view.rot, view.flip_h, view.flip_v, view._img = saved
+
+
+def plane_choices(view):
+    """[(label, reconstruction)] per patient plane, the viewport's current one first."""
+    out = {}
+    for o in (view.orientation, "axial", "coronal", "sagittal"):
+        with in_plane(view, o):
+            out.setdefault(view.plane_name().capitalize(), o)
+    return list(out.items())
+
+
+def render_collage(view, indices, cols, rows, tile_w=384, labels=True, title="", orientation=None):
+    """One QImage of cols × rows tiles (the first cols × rows of `indices`), in the viewport's plane or `orientation`."""
     indices = list(indices)[:cols * rows]
     if not indices:
         return None
-    old = view.index
     tiles = []
-    try:
+    with in_plane(view, orientation or view.orientation):
         for k in indices:
             view.index = k
             tiles.append((k, view._compose(), None if is_movie(view) else view.world_pos()))
-    finally:
-        view.index = old
+        sr, sc = view._disp_spacing()
+        total = view.count()
     img0 = tiles[0][1]
-    sr, sc = view._disp_spacing()
     tile_h = max(16, int(round(tile_w * (img0.height() * sr) / max(1e-6, img0.width() * sc))))
     top = HEADER_PX if labels else 0
     used_rows = (len(tiles) + cols - 1) // cols        # no empty rows when the series has fewer slices
@@ -80,7 +102,7 @@ def render_collage(view, indices, cols, rows, tile_w=384, labels=True, title="")
             qp.setFont(QFont("Segoe UI", max(8, tile_w // 32)))
             fm = qp.fontMetrics()
             qp.setPen(QColor(235, 235, 235))
-            qp.drawText(int(rect.x()) + 5, int(rect.y()) + 3 + fm.ascent(), f"{k + 1}/{view.count()}")
+            qp.drawText(int(rect.x()) + 5, int(rect.y()) + 3 + fm.ascent(), f"{k + 1}/{total}")
             if pos is not None:
                 t = f"{pos:.1f} mm"
                 qp.drawText(int(rect.right() - fm.horizontalAdvance(t) - 5), int(rect.bottom()) - 5, t)
@@ -104,8 +126,16 @@ class CollageDialog(QDialog):
         self.setWindowTitle("Collage")
         self.movie = is_movie(view)
         self.spacing = view.axis_spacing()
+        self.orientation = view.orientation
+        self.n = view.count()
         v = QVBoxLayout(self)
         f = QFormLayout()
+        self.plane = QComboBox()
+        for label, o in plane_choices(view):
+            self.plane.addItem(label, o)
+        self.plane.setToolTip("Patient plane of the tiles. A thin-slice series gives sharp reformats, like MPR.")
+        self.plane.setEnabled(not self.movie and self.plane.count() > 1)
+        f.addRow("Plane:", self.plane)
         self.grid = QComboBox()
         for c, r in GRIDS:
             self.grid.addItem(f"{c} × {r}  ({c} columns, {r} rows)", (c, r))
@@ -183,12 +213,20 @@ class CollageDialog(QDialog):
         self.start.valueChanged.connect(self.set_first)
         self.first.valueChanged.connect(lambda k: self.set_first(k - 1))
         self.grid.currentIndexChanged.connect(self._grid_changed)
+        self.plane.currentIndexChanged.connect(self._plane_changed)
         self.size.currentIndexChanged.connect(self.refresh)
         self.labels.toggled.connect(self.refresh)
         self._grid_changed()
 
     def cells(self):
         return self.cols.value() * self.rows.value()
+
+    def _plane_changed(self):
+        self.orientation = self.plane.currentData()
+        with in_plane(self.view, self.orientation) as v:
+            self.spacing, self.n = v.axis_spacing(), v.count()
+        self._first = None
+        self.refresh()
 
     def _grid_changed(self):
         cr = self.grid.currentData()
@@ -208,7 +246,7 @@ class CollageDialog(QDialog):
         """Grid or interval changed: keep the run centred on the same slice."""
         if self._first is not None:
             step = step_for(self.spacing, self.interval.value())
-            n = min(self.cells(), (self.view.count() - 1) // step + 1)
+            n = min(self.cells(), (self.n - 1) // step + 1)
             self._first = int(round(self._mid - (n - 1) * step / 2))
         self.refresh()
 
@@ -218,12 +256,12 @@ class CollageDialog(QDialog):
 
     def indices(self):
         if self.movie:
-            return frame_indices(self.view.count(), self.cells())
-        return slice_indices(self.view.count(), self.spacing, self.interval.value(), self.cells(), self._first)
+            return frame_indices(self.n, self.cells())
+        return slice_indices(self.n, self.spacing, self.interval.value(), self.cells(), self._first)
 
     def title(self):
         vol = self.view.vol
-        parts = [privacy.name(vol.patient), vol.description, self.view.orientation.upper()]
+        parts = [privacy.name(vol.patient), vol.description, self.plane.currentText().upper()]
         if not self.movie:
             step = step_for(self.spacing, self.interval.value()) * self.spacing
             parts.append(f"every {step:.1f} mm")
@@ -235,7 +273,8 @@ class CollageDialog(QDialog):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 self._image = render_collage(self.view, self.indices(), self.cols.value(), self.rows.value(),
-                                             self.size.currentData(), self.labels.isChecked(), self.title())
+                                             self.size.currentData(), self.labels.isChecked(), self.title(),
+                                             self.orientation)
             finally:
                 QApplication.restoreOverrideCursor()
         return self._image
@@ -244,7 +283,7 @@ class CollageDialog(QDialog):
         self._image = None
         idx = self.indices()
         self._mid = (idx[0] + idx[-1]) / 2      # centre kept when the grid or the interval changes
-        n = self.view.count()
+        n = self.n
         step = step_for(self.spacing, self.interval.value())
         if not self.movie:
             max_first = n - 1 - (len(idx) - 1) * step
@@ -266,6 +305,10 @@ class CollageDialog(QDialog):
         else:
             how = (f"{len(idx)} images, one every {step * self.spacing:.1f} mm — images {idx[0] + 1}–{idx[-1] + 1} "
                    f"of {n}; move the slider to shift them")
+        thick = self.view.vol.spacing[0]
+        native = self.plane.currentIndex() == 0 and self.orientation == self.view.orientation
+        if thick > 1.5 and not (native and self.view.orientation == "axial"):
+            how += f". Reformatted from {thick:.1f} mm slices: it looks blurred across them, a thin-slice series is sharper"
         self.info.setText(how + ".")
         img = self.image()
         if img is not None:

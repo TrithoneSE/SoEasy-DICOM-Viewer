@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -20,6 +21,7 @@ from .busy import BusyDialog
 from .icons import icon
 from .snapshots import SnapshotPanel
 from .ui import collapsible, hint
+from .seed_range import SeedRangeEditor
 from .segment import Segment, auto_grow, local_stats, region_grow
 from .tf_editor import NEW_CURVE_COLORS, TFEditor
 from .tools import abc2_dialog
@@ -201,7 +203,8 @@ class VRWindow(QMainWindow):
         for mode, label, tip, ic in (
                 ("free", "Rotate", "Left-drag = free 3D rotate (trackball)", "orbit"),
                 ("roll", "Roll", "Left-drag around the centre = turn the picture in the screen plane only", "roll"),
-                ("turn", "Turn", "Left-drag left / right = turn around the head's long axis only", "turn")):
+                ("turn", "Turn", "Left-drag left / right = turn around the head's long axis only", "turn"),
+                ("pan", "Pan", "Left-drag = move the model on the screen", "pan")):
             a = self._act(label, lambda on, m=mode: on and self.set_rotate_mode(m), None,
                           tip + ". Right-drag / wheel = zoom, middle = pan.", True, label, ic)
             group.addAction(a)
@@ -365,6 +368,12 @@ class VRWindow(QMainWindow):
         f.addRow("Fill bone cavities (diploe):", self.bone_close_spin)
         self.bone_rim_spin = self._dspin(0, 5, self.state.bone_rim_mm, " mm", self._on_bone_changed, 0.5)
         f.addRow("Bone edge width:", self.bone_rim_spin)
+        self.artery_spin = self._dspin(0, 1500, 0, " HU", self._on_artery_changed, 10)
+        self.artery_spin.setSpecialValueText("Automatic")
+        self.artery_spin.setToolTip("Curves named Veins: arteries are the voxels above this value and what connects to\n"
+                                    "them. Works on an arterial-phase CTA; on a late phase veins are just as bright.")
+        self.artery_lbl = QLabel("Arteries start at:")
+        f.addRow(self.artery_lbl, self.artery_spin)
         v.addWidget(box)
 
         box = QGroupBox("Rendering")
@@ -467,6 +476,14 @@ class VRWindow(QMainWindow):
         self.seg_list.itemChanged.connect(self._on_seg_item_changed)
         self.seg_list.currentItemChanged.connect(self._on_seg_selected)
         bv.addWidget(self.seg_list, 1)
+        self.seed_range = SeedRangeEditor()
+        self.seed_range.setVisible(False)
+        self.seed_range.rangeChanged.connect(self._on_seed_range)
+        self._range_want = self._range_job = None
+        self._range_timer = QTimer(self)
+        self._range_timer.setInterval(30)
+        self._range_timer.timeout.connect(self._range_poll)
+        bv.addWidget(self.seed_range)
         row = QHBoxLayout()
         for text, ic, fn, tip in [("Empty", "brush", self.new_empty_segment, "New empty segment to paint with the brush"),
                                   ("Color", "palette", self._seg_recolor, "Color of the selected segment"),
@@ -606,12 +623,18 @@ class VRWindow(QMainWindow):
         self._sync_controls_from_tf()
         self.editor.set_tf(self.state.tf)
         self.editor.fit_view_to_curves()
+        self._update_encoding()
 
     def _update_encoding(self):
-        want = self.bone_chk.isChecked() and self._blend == "composite"
+        composite = self._blend == "composite"
+        want = self.bone_chk.isChecked() and composite
+        veins = composite and any(c.layer == "vein" for c in self.state.tf.curves)
         st = self.state
-        if want != st.encode_bone or st.render_data is None:
+        if want != st.encode_bone or veins != st.encode_veins or st.render_data is None:
             st.encode_bone = want
+            st.encode_veins = veins
+            self.artery_lbl.setVisible(veins)
+            self.artery_spin.setVisible(veins)
             self.setCursor(Qt.WaitCursor)
             try:
                 st.update_render_data()
@@ -629,6 +652,18 @@ class VRWindow(QMainWindow):
         self._update_encoding()
         self._show_bone_marker()
         self.apply_tf()
+
+    def _on_artery_changed(self, val):
+        self.state.artery_hu = val or None
+        if self.state.vein_encoded:
+            self.setCursor(Qt.WaitCursor)
+            try:
+                self.state.update_render_data()
+            finally:
+                self.unsetCursor()
+            self.vr.refresh_data(render=False)
+            self.apply_tf()
+            self.statusBar().showMessage(f"Arteries start at {self.state.artery_hu_used:.0f} HU", 6000)
 
     def _show_bone_marker(self):
         st = self.state
@@ -735,7 +770,9 @@ class VRWindow(QMainWindow):
         a.blockSignals(False)
         self.statusBar().showMessage({"free": "Left-drag = free 3D rotate.",
                                       "roll": "Left-drag around the centre = roll the picture (one axis).",
-                                      "turn": "Left-drag left / right = turn around the head's long axis."}[mode], 6000)
+                                      "turn": "Left-drag left / right = turn around the head's long axis.",
+                                      "pan": "Left-drag = move the model on the screen. Views > Fit puts it back."}[mode],
+                                     6000)
 
     def show_snapshots(self):
         if self.snap_panel is None:
@@ -760,7 +797,9 @@ class VRWindow(QMainWindow):
         QMessageBox.information(self, "3D window — quick guide", (
             "MOUSE\n"
             "  Left drag = rotate • Right drag / wheel = zoom • Middle drag = pan\n"
-            "  Rotate / Roll / Turn buttons: free 3D rotate, Roll (screen plane only) or Turn (head's long axis)\n"
+            "  Rotate / Roll / Turn / Pan buttons: free 3D rotate, Roll (screen plane only), Turn (head's long axis)\n"
+            "  or Pan (left drag moves the model; Views > Fit to window puts it back)\n"
+            "  Segments tab: after a seed, drag the two handles over the histogram to change what enters the segment\n"
             "  Keys 1–6 = front, back, right, left, top, bottom • + / − = zoom • 0 = fit\n\n"
             "TOOLS (one use, then the mouse rotates again)\n"
             "  Measure ▾ (L, A, C, O, Y, T): press on the surface and drag\n"
@@ -929,6 +968,55 @@ class VRWindow(QMainWindow):
         if seg is not None and seg.seed is not None and seg in self.state.segments:
             self.seed(*seg.seed, replace=seg)
 
+    # seed range editor: re-grow in a thread, newest request wins, so dragging stays smooth
+    def _on_seed_range(self, lo, hi):
+        self._range_want = (lo, hi)
+        if self._range_job is None:
+            self._range_start()
+
+    def _range_start(self):
+        st = self.state
+        seg = st.active_segment
+        lo, hi = self._range_want
+        self._range_want = None
+        if seg is None or seg.seed is None:
+            return
+        leak = self.seg_leak.value()
+        bounds = self.vr.crop_bounds_ijk() if self.seg_crop.isChecked() else None
+        smooth = 1.0 if self.seg_smooth.isChecked() else 0.0
+        job = {"seg": seg, "lo": lo, "hi": hi, "new": None}
+
+        def work():
+            mask = region_grow(st.vol.data, st.vol.spacing, seg.seed, lo, hi, leak, bounds, 70.0, smooth)
+            if mask is not None:
+                job["new"] = Segment(seg.name, mask[0], mask[1], st.vol.shape, seg.color, st.vol.spacing)
+
+        job["thread"] = threading.Thread(target=work, daemon=True)
+        self._range_job = job
+        job["thread"].start()
+        self._range_timer.start()
+
+    def _range_poll(self):
+        job = self._range_job
+        if job is None or job["thread"].is_alive():
+            return
+        self._range_timer.stop()
+        self._range_job = None
+        st, old, new = self.state, job["seg"], job["new"]
+        if new is not None and old in st.segments:
+            new.range = (job["lo"], job["hi"])
+            new.seed = old.seed
+            new.visible, new.opacity = old.visible, old.opacity
+            st.segments[st.segments.index(old)] = new
+            st.active_segment = new
+            self._refresh_seg_list(select=new)
+            self.vr.sync_segments()
+            self.segmentsChanged.emit(st)
+            self.statusBar().showMessage(f"Segment '{new.name}': {new.volume_ml:.2f} ml "
+                                         f"({job['lo']:.0f}…{job['hi']:.0f})", 8000)
+        if self._range_want is not None:
+            self._range_start()
+
     def _seed(self, z, y, x, busy, replace=None):
         st = self.state
         val = float(st.vol.data[z, y, x])
@@ -1038,6 +1126,7 @@ class VRWindow(QMainWindow):
             if seg is (select or st.active_segment):
                 self.seg_list.setCurrentItem(it)
         self.seg_list.blockSignals(False)
+        self.seed_range.set_segment(st.vol.data, st.vol.spacing, st.active_segment)
 
     def _current_seg(self):
         it = self.seg_list.currentItem()
@@ -1045,6 +1134,7 @@ class VRWindow(QMainWindow):
 
     def _on_seg_selected(self, cur, _):
         self.state.active_segment = cur.data(Qt.UserRole) if cur else None
+        self.seed_range.set_segment(self.state.vol.data, self.state.vol.spacing, self.state.active_segment)
         if self.state.active_segment:
             self.seg_opacity.blockSignals(True)
             self.seg_opacity.setValue(int(self.state.active_segment.opacity * 100))

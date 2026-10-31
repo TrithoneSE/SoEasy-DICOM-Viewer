@@ -28,6 +28,8 @@ class TFPoint:
 
 def _guess_layer(name):
     n = name.lower()
+    if n.startswith("vein") or n.startswith("vena"):
+        return "vein"
     return "bone" if n.startswith("tulang") or n.startswith("bone") else "normal"     # "tulang": old presets
 
 
@@ -35,7 +37,8 @@ def _guess_layer(name):
 class TFCurve:
     name: str = "Curve"
     points: list = field(default_factory=list)
-    # "bone" = used inside the bone area (bone color lock); "normal" = outside it
+    # "bone" = used inside the bone area (bone color lock); "vein" = vessels that are not arteries
+    # (segment.classify_arteries); "normal" = everything else
     layer: str = "normal"
     # True = color only homogeneous tissue (skip the partial-volume rim around brighter structures)
     hide_edges: bool = False
@@ -91,7 +94,7 @@ class TransferFunction:
     def curve_samples(self, xs, layer=None):
         """[(opacity, rgb, hide_edges)] of each curve at xs; layer None = all curves, 'normal' / 'bone' = that layer."""
         return [(*c.sample(xs), c.hide_edges) for c in self.curves
-                if len(c.points) >= 2 and (layer is None or c.layer == layer)]
+                if len(c.points) >= 2 and (layer is None or c.layer == layer or c.layer in layer)]
 
     def sample(self, xmin: float, xmax: float, n: int = 1024, gain: float = 1.0, offset: float = 0.0, layer=None,
                fill_black=True):
@@ -165,14 +168,14 @@ def builtin_presets() -> list[TransferFunction]:
         _c("Bone", [(180, 0, IVORY), (300, 0.12, IVORY), (650, 0.55, BONE_HI), (3000, 0.85, BONE_HI)]),
     ]))
     p.append(TransferFunction("CT Angio - Vessels + Bone", [
-        _c("Vessels", [(130, 0, RED), (190, 0.18, RED), (280, 0.45, RED_HI), (380, 0.0, RED_HI)]),
+        _c("Vessels", [(130, 0, RED), (190, 0.18, RED), (280, 0.45, RED_HI), (800, 0.45, RED_HI), (1000, 0.0, RED_HI)]),
         _c("Bone", [(380, 0, IVORY), (500, 0.35, IVORY), (900, 0.7, BONE_HI), (3000, 0.9, BONE_HI)]),
     ]))
-    # Arteries vs veins by HU: only separable on an arterial-phase CTA (arteries 250–500 HU, veins still faint).
-    # On a delayed / venous-phase scan both sit at ~130–350 HU and the two curves just split one vessel range.
+    # Veins are a layer of their own (segment.classify_arteries: arteries = bright voxels + what connects to them), so
+    # the two curves may overlap in HU. Works on an arterial-phase CTA; on a late phase both are equally bright.
     p.append(TransferFunction("CT Angio - Arteries / Veins + Bone", [
-        _c("Veins", [(120, 0, VEIN), (160, 0.12, VEIN), (210, 0.3, VEIN_HI), (250, 0.0, VEIN_HI)]),
-        _c("Arteries", [(220, 0, RED), (270, 0.35, RED), (380, 0.45, RED_HI), (450, 0.0, RED_HI)]),
+        _c("Veins", [(100, 0, VEIN), (140, 0.2, VEIN), (200, 0.45, VEIN_HI), (500, 0.45, VEIN_HI), (600, 0.0, VEIN_HI)]),
+        _c("Arteries", [(110, 0, RED), (170, 0.2, RED), (280, 0.45, RED_HI), (450, 0.45, RED_HI), (500, 0.0, RED_HI)]),
         _c("Bone", [(450, 0, IVORY), (600, 0.4, IVORY), (900, 0.7, BONE_HI), (3000, 0.9, BONE_HI)]),
     ]))
     p.append(TransferFunction("CT Angio - Vessels only", [
