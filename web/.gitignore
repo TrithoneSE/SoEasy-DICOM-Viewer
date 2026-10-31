@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.log
+# the repo .gitignore leaves out DICOM/ data folders; this is source code
+!src/dicom/

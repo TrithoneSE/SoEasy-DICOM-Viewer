@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#17191D" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SoEasy" />
+  <meta name="referrer" content="no-referrer" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <title>SoEasy DICOM Viewer</title>
+</head>
+<body>
+  <header id="bar">
+    <div class="brand"><img src="./icons/icon-192.png" alt="" width="26" height="26" /><span>SoEasy</span></div>
+    <div id="tools" class="tools"></div>
+  </header>
+  <div id="main">
+    <aside id="side">
+      <div id="series"></div>
+    </aside>
+    <section id="view">
+      <div id="grid" data-layout="1x1">
+        <div class="cell"><canvas></canvas></div>
+        <div class="cell"><canvas></canvas></div>
+        <div class="cell"><canvas></canvas></div>
+        <div class="cell"><canvas></canvas></div>
+      </div>
+      <div id="mpr" hidden data-layout="all">
+        <div class="cell"><canvas></canvas></div>
+        <div class="cell"><canvas></canvas></div>
+        <div class="cell"><canvas></canvas></div>
+      </div>
+      <div id="vr" hidden>
+        <div class="vr-view"><canvas id="vr-canvas"></canvas><div id="vr-label"></div><div id="vr-snaps" hidden></div></div>
+        <div id="vr-panel">
+          <div class="vr-row tools3d">
+            <button id="t3-pan" class="chip" title="Pan: one finger moves the model (P). Two fingers always pan">Pan</button>
+            <button id="t3-measure" class="chip" title="Length between two points of the surface (L): drag from one to the other. It stays on the model when you turn it">Measure</button>
+            <button id="t3-mdel" class="chip" title="Delete the selected length, or the last one (Delete)">Delete length</button>
+            <button id="t3-crop" class="chip" title="Crop box: drag the coloured handles (Shift+C)">Crop</button>
+            <button id="t3-box" class="chip" title="Hide / show the crop box — the crop stays (B)">Hide box</button>
+            <button id="t3-cut" class="chip" title="Scalpel: draw around what to remove (X)">Scalpel</button>
+            <button id="t3-undo" class="chip" title="Undo the last cut (Ctrl+Z)">Undo</button>
+            <button id="t3-reset" class="chip" title="Bring back everything that was cut">Reset cuts</button>
+            <button id="t3-snap" class="chip" title="Keep this view as a snapshot (Insert)">+ Snapshot</button>
+            <button id="t3-png" class="chip" title="Save the 3D view as a PNG image">PNG</button>
+          </div>
+          <div class="vr-row">
+            <select id="vr-preset" aria-label="Colour preset"></select>
+            <select id="vr-res" title="Quality of the volume in graphics memory. Auto: full unless this device cannot hold it. Half: ¼ of the memory, softer image" aria-label="Quality">
+              <option value="auto">Auto</option><option value="full">Full</option><option value="half">Half</option>
+            </select>
+            <button id="vr-save" class="chip" title="Save the curves as your own preset (kept in this browser)">Save</button>
+            <button id="vr-more" class="chip" title="Export / import presets (desktop JSON)">⋯</button>
+          </div>
+          <div class="vr-row">
+            <label class="slider">Opacity <input id="vr-gain" type="range" min="-1.2" max="1.2" step="0.01" value="0" /></label>
+            <label class="slider" id="vr-rim-l">Rims <input id="vr-rim" type="range" min="0" max="1" step="0.005" /><span id="vr-rim-v"></span></label>
+          </div>
+          <div class="vr-row">
+            <label class="check" id="vr-bone-l"><input id="vr-bone" type="checkbox" /> Bone lock <span id="vr-bone-v"></span></label>
+            <label class="check"><input id="vr-shade" type="checkbox" /> Shading</label>
+            <label class="check" id="vr-art-l" hidden title="Arteries: voxels at or above this HU and what connects to them. Empty = automatic">Artery ≥ <input id="vr-art" type="number" min="100" max="1000" step="10" inputmode="numeric" /></label>
+          </div>
+          <div class="vr-row curve-tools">
+            <button id="ct-add" class="chip" title="Add a curve">+ Curve</button>
+            <button id="ct-color" class="chip" title="Colour of the selected point or curve">Colour</button>
+            <button id="ct-bone" class="chip" title="Bone curve: this curve colours only the bone area">Bone</button>
+            <button id="ct-rims" class="chip" title="Rims hidden: this curve leaves out the edges of vessels and bone">Rims</button>
+            <button id="ct-del" class="chip">Delete</button>
+          </div>
+          <div id="vr-editor"></div>
+        </div>
+      </div>
+      <div id="seg" hidden>
+        <div class="seg-head">
+          <span id="seg-dot"></span><b id="seg-name"></b><span id="seg-ml"></span>
+          <span class="seg-gap"></span>
+          <button id="seg-hide" class="chip">Hide</button>
+          <button id="seg-del" class="chip">Delete</button>
+          <button id="seg-done" class="chip">Done</button>
+        </div>
+        <canvas id="seg-hist" title="Drag the two handles: what enters the segment"></canvas>
+        <div id="seg-range"></div>
+      </div>
+      <div id="welcome">
+        <img src="./icons/icon-512.png" alt="" width="96" height="96" />
+        <h1>SoEasy DICOM Viewer</h1>
+        <p>Open DICOM files, a folder or a .zip archive. Everything is processed on this device — nothing is uploaded.</p>
+        <div class="row">
+          <button id="w-files" class="big">Open files / .zip</button>
+          <button id="w-folder" class="big secondary">Open folder</button>
+        </div>
+        <p class="hint">Desktop: you can also drop files or folders here.</p>
+        <p class="disclaimer">Personal visualisation aid — not a certified diagnostic device.</p>
+      </div>
+      <div id="progress" hidden><div class="bar"><div></div></div><span></span></div>
+    </section>
+  </div>
+  <footer id="cine" hidden>
+    <button id="c-play" class="icon" title="Play / pause (Space)"></button>
+    <input id="c-slider" type="range" min="1" max="1" value="1" aria-label="Frame" />
+    <span id="c-pos">1/1</span>
+    <span class="fps"><button id="c-slower" class="small" aria-label="Slower">−</button><span id="c-fps">10 fps</span><button id="c-faster" class="small" aria-label="Faster">+</button></span>
+  </footer>
+  <div id="dsapad" hidden>
+    <div class="pad">
+      <button data-d="-1,0" aria-label="Mask up">▲</button>
+      <button data-d="0,-1" aria-label="Mask left">◀</button>
+      <button id="pad-step" class="step">1 px</button>
+      <button data-d="0,1" aria-label="Mask right">▶</button>
+      <button data-d="1,0" aria-label="Mask down">▼</button>
+    </div>
+  </div>
+  <div id="menu" class="menu" hidden></div>
+  <div id="toast" hidden></div>
+  <dialog id="about"></dialog>
+  <dialog id="collage"></dialog>
+  <input id="pick-files" type="file" multiple hidden />
+  <input id="pick-folder" type="file" multiple webkitdirectory hidden />
+  <input id="pick-preset" type="file" accept=".json,application/json" hidden />
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>
