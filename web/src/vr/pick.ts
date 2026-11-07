@@ -3,7 +3,8 @@
  * curves, the same way the shader does (renderer.ts) — so a 3D measurement lands on what is seen, with no extra
  * graphics memory and no read-back from the GPU. Only the opacity of the table is kept, at low resolution.
  */
-import { BONE_OFFSET, CT_FLOOR, encodeVessel, maskAt, VEIN_OFFSET, type BoneRegion, type VesselMasks } from "./bone";
+import { BONE_OFFSET, CT_FLOOR, encodeCT, maskAt, notVesselHu, VEIN_OFFSET, type BoneRegion, type VesselMasks } from "./bone";
+import { encodeVeno, venoIndex, type VenoMasks } from "./venography";
 
 type V3 = [number, number, number];
 
@@ -22,6 +23,9 @@ export interface PickScene {
   clipHi: V3;
   bone: BoneRegion | null;
   vessels?: VesselMasks | null;
+  veno?: VenoMasks | null;
+  /** As VolumeRenderer.hard: both phases, no vein layer. */
+  hard?: { arteries: BoneRegion; hu: number } | null;
   ct: boolean;
   removed: Uint32Array | null;
   air: number;
@@ -68,12 +72,16 @@ export function pickSurface(s: PickScene, ro: V3, rd: V3): V3 | null {
     const X = sx0 + x * f, Y = sy0 + y * f, Z = sz0 + z;
     let v = data[(Z * s.rows + Y) * cols + X];
     if (ct && v < CT_FLOOR) v = CT_FLOOR;
-    if (bone) {
-      const b = (Z * bone.ny + Math.floor(Y / bone.f)) * bone.nx + Math.floor(X / bone.f);
-      if (bone.bits[b >>> 5] & (1 << (b & 31))) return -BONE_OFFSET - v;
-    }
-    if (s.vessels) v = encodeVessel(v, maskAt(s.vessels.arteries, X, Y, Z), maskAt(s.vessels.veins, X, Y, Z));
-    return v;
+    if (s.veno) return encodeVeno(s.veno, v, venoIndex(s.veno, X, Y, Z), bone !== null);
+    let inArea = bone !== null && maskAt(bone, X, Y, Z);
+    const m = s.vessels;
+    // as renderer.fill: both phases and no vein layer, what reaches the bone lock outside the area and is no artery
+    if (bone && !m && !inArea && s.hard && v >= s.hard.hu && !maskAt(s.hard.arteries, X, Y, Z)) inArea = true;
+    // as renderer.fill: bone from the plain scan, and this voxel did not get brighter with contrast
+    if (bone?.enhanced && !inArea && v > notVesselHu(m) && !maskAt({ ...bone, bits: bone.enhanced }, X, Y, Z)) v = notVesselHu(m);
+    if (!m) return inArea ? -BONE_OFFSET - v : v;
+    return encodeCT(m, data, cols, cols * s.rows, (Z * s.rows + Y) * cols + X, v, bone !== null, inArea, maskAt(m.arteries, X, Y, Z),
+      maskAt(m.veins, X, Y, Z), m.edge !== undefined && maskAt(m.edge, X, Y, Z));
   };
   const [ox, oy, oz] = s.origin, [dx, dy, dz] = s.spacing;
   /** Trilinear, as the GPU's filter: voxel i is centred at origin + (i + 0.5) · spacing. */

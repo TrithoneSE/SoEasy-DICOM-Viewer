@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-import threading
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
@@ -21,8 +20,8 @@ from .busy import BusyDialog
 from .icons import icon
 from .snapshots import SnapshotPanel
 from .ui import collapsible, hint
-from .seed_range import SeedRangeEditor
-from .segment import Segment, auto_grow, local_stats, region_grow
+from .seed_range import SeedRangeEditor, grower_of
+from .segment import ANTI_LEAK_MM, Segment, auto_grow, local_stats, region_grow
 from .tf_editor import NEW_CURVE_COLORS, TFEditor
 from .tools import abc2_dialog
 from .volume_view import MEASURE3D, VolumeView
@@ -59,6 +58,14 @@ def _scroll(page):
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     sa.setWidget(page)
     return sa
+
+
+def _motion_text(motion, vol):
+    """'6° and 9 mm': the rotation of venography.register's (R, t) and how far it moved the middle of the volume."""
+    rot, shift = motion
+    deg = float(np.degrees(np.arccos(np.clip((np.trace(rot) - 1) / 2, -1, 1))))
+    c = vol.index_to_world((np.array(vol.data.shape) - 1) / 2.0)
+    return f"{deg:.0f}° and {float(np.linalg.norm(rot @ c + shift - c)):.0f} mm"
 
 
 class VRWindow(QMainWindow):
@@ -101,6 +108,9 @@ class VRWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.tabs = tabs
 
+        self._busy = None           # the wait panel of a slow change, while it is on screen
+        self._working = False       # its worker thread is changing the render data
+        self.vr.vtk_widget.installEventFilter(self)
         self._tf_timer = QTimer(self)
         self._tf_timer.setSingleShot(True)
         self._tf_timer.setInterval(25)
@@ -368,12 +378,32 @@ class VRWindow(QMainWindow):
         f.addRow("Fill bone cavities (diploe):", self.bone_close_spin)
         self.bone_rim_spin = self._dspin(0, 5, self.state.bone_rim_mm, " mm", self._on_bone_changed, 0.5)
         f.addRow("Bone edge width:", self.bone_rim_spin)
+        self.bone_note = hint("")
+        f.addRow(self.bone_note)
         self.artery_spin = self._dspin(0, 1500, 0, " HU", self._on_artery_changed, 10)
         self.artery_spin.setSpecialValueText("Automatic")
         self.artery_spin.setToolTip("Curves named Veins: arteries are the voxels above this value and what connects to\n"
                                     "them. Works on an arterial-phase CTA; on a late phase veins are just as bright.")
         self.artery_lbl = QLabel("Arteries start at:")
         f.addRow(self.artery_lbl, self.artery_spin)
+        self.phase_combo = QComboBox()
+        self.phase_combo.addItem("Automatic (series name)", "auto")
+        self.phase_combo.addItem("Arterial", "arterial")
+        self.phase_combo.addItem("Venous", "venous")
+        self.phase_combo.setToolTip("Which phase this series is. A venous series alone: every bright vessel is a vein,\n"
+                                    "because arteries have washed out by then.")
+        self.phase_combo.setCurrentIndex(max(0, self.phase_combo.findData(self.state.phase_mode)))
+        self.phase_combo.activated.connect(self._on_phase_changed)
+        self.phase_lbl = QLabel("This series is:")
+        f.addRow(self.phase_lbl, self.phase_combo)
+        self.combine_chk = QCheckBox("Arteries + veins from both phases")
+        self.combine_chk.setChecked(self.state.combine_phases)
+        self.combine_chk.setToolTip("Arteries are drawn from the arterial series and veins from the venous one,\n"
+                                    "told apart voxel by voxel by which phase is brighter.")
+        self.combine_chk.toggled.connect(self._on_phase_changed)
+        f.addRow(self.combine_chk)
+        self.phase_note = hint("")
+        f.addRow(self.phase_note)
         v.addWidget(box)
 
         box = QGroupBox("Rendering")
@@ -445,10 +475,9 @@ class VRWindow(QMainWindow):
         self.seg_hi = self._dspin(-100000, 100000, 100, "", None)
         f.addRow("Manual min:", self.seg_lo)        # one per row: side by side they were wider than the panel
         f.addRow("Manual max:", self.seg_hi)
-        self.seg_leak = QSpinBox()
-        self.seg_leak.setRange(0, 4)
-        self.seg_leak.setValue(1)
-        self.seg_leak.setSuffix(" voxel")
+        self.seg_leak = self._dspin(0, 4, ANTI_LEAK_MM, " mm", None, 0.2)
+        self.seg_leak.setToolTip("Contacts narrower than twice this are cut, so a lesion does not run into a\n"
+                                 "neighbour of the same HU (muscle, mucosa). 0 = off, for thin vessels.")
         f.addRow("Anti-leak:", self.seg_leak)
         self.seg_crop = QCheckBox("Limit to the crop box (when active)")
         self.seg_crop.setChecked(True)
@@ -478,11 +507,11 @@ class VRWindow(QMainWindow):
         bv.addWidget(self.seg_list, 1)
         self.seed_range = SeedRangeEditor()
         self.seed_range.setVisible(False)
-        self.seed_range.rangeChanged.connect(self._on_seed_range)
-        self._range_want = self._range_job = None
-        self._range_timer = QTimer(self)
-        self._range_timer.setInterval(30)
-        self._range_timer.timeout.connect(self._range_poll)
+        self.seed_range.rangeChanged.connect(lambda lo, hi: self.grower.request(lo, hi))
+        self.grower = grower_of(self.state)
+        self.grower.params = self._grow_params
+        self.grower.grown.connect(self._on_grown)
+        self.grower.busy.connect(self.seed_range.set_growing)
         bv.addWidget(self.seed_range)
         row = QHBoxLayout()
         for text, ic, fn, tip in [("Empty", "brush", self.new_empty_segment, "New empty segment to paint with the brush"),
@@ -573,6 +602,9 @@ class VRWindow(QMainWindow):
         self._fine_timer.start()
 
     def apply_tf(self, fast=False):
+        if self._working:           # half-made render data: draw once it is done
+            self._fine_timer.start()
+            return
         tf = self.state.tf
         tf.shading = self.shade_chk.isChecked()
         tf.ambient = self.amb_slider.value() / 100
@@ -630,17 +662,117 @@ class VRWindow(QMainWindow):
         want = self.bone_chk.isChecked() and composite
         veins = composite and any(c.layer == "vein" for c in self.state.tf.curves)
         st = self.state
-        if want != st.encode_bone or veins != st.encode_veins or st.render_data is None:
+        venography = veins and st.vol.modality == "CT" and getattr(st.tf, "venography", False)
+        if want != st.encode_bone or veins != st.encode_veins or st.render_data is None                 or venography != st.veno_built:
             st.encode_bone = want
             st.encode_veins = veins
-            self.artery_lbl.setVisible(veins)
-            self.artery_spin.setVisible(veins)
-            self.setCursor(Qt.WaitCursor)
+            own = self._busy is None and self.isVisible()
+            if own:
+                self._busy = BusyDialog(self, "Updating 3D")
             try:
-                st.update_render_data()
+                if self._busy is None:              # still being built: the 3D opening panel is on screen
+                    self.setCursor(Qt.WaitCursor)
+                    try:
+                        st.update_render_data()
+                    finally:
+                        self.unsetCursor()
+                    self.vr.refresh_data(render=False)
+                else:
+                    # the render buffer is rewritten in place: no frame until the new table goes with it
+                    self._working = True            # eventFilter: no paint of the 3D view meanwhile
+                    try:
+                        self._busy.run("Venography: finding the vessels..." if st.venography else
+                                       "Separating arteries and veins..." if veins else
+                                       "Locking the bone colors..." if want else "Preparing the volume...",
+                                       st.update_render_data)
+                        self.vr.refresh_data(render=False)
+                    finally:
+                        self._working = False
+                # every caller re-applies the transfer function right after
             finally:
-                self.unsetCursor()
-            self.vr.refresh_data(render=False)      # every caller re-applies the transfer function right after
+                if own:
+                    self._busy.close()
+                    self._busy = None
+        self._show_phase_ui(veins)
+
+    def eventFilter(self, obj, e):
+        # the wait panel keeps the event loop running: the 3D view would paint a half-rewritten buffer
+        if self._working and obj is self.vr.vtk_widget and e.type() == QEvent.Paint:
+            return True
+        return super().eventFilter(obj, e)
+
+    def _show_phase_ui(self, veins):
+        st = self.state
+        note = st.bone_note() if st.encode_bone and not st.venography else ""
+        self.bone_note.setText(note)
+        self.bone_note.setVisible(bool(note))
+        if veins and st.venography:
+            for w in (self.artery_lbl, self.artery_spin, self.phase_lbl, self.phase_combo, self.combine_chk):
+                w.setVisible(False)
+            self.phase_note.setText(
+                "Venography: the inside of the skull has curves of its own — Brain (white) and Veins (blue) — and the "
+                "scalp and face keep theirs. Vessels against the skull are told from bone " +
+                ("by the plain scan of this study (bright only after contrast)" +
+                 (", lined up first: the patient had moved between the scans (" + _motion_text(st.plain_moved, st.vol) + ")."
+                  if st.plain_moved is not None else ".") if st.plain_data() is not None else
+                 f"by their distance from it: the plain scan of this study does not line up with this one (the "
+                 f"patient moved: {st.plain_match:.0%} of the bone matched), so a sinus right against the skull may lose "
+                 f"a voxel." if st.plain_match is not None else
+                 "by their shape: a newborn's skull plates are thin sheets (the plain scan is not needed)."
+                 if st.thin_skull else
+                 "by their distance from it (no plain scan of this study on the same patient coordinates), so a sinus "
+                 "right against the skull may lose a voxel.") +
+                " Arteries are blue too: a routine contrast CT shows both.")
+            self.phase_note.setVisible(True)
+            return
+        arterial_alone = veins and not st.paired and st.phase == "arterial"
+        self.artery_lbl.setVisible(arterial_alone)
+        self.artery_spin.setVisible(arterial_alone)
+        self.phase_lbl.setVisible(veins)
+        self.phase_combo.setVisible(veins)
+        self.combine_chk.setVisible(veins and st.partner is not None)
+        if not veins:
+            note = ""
+        elif st.paired:
+            m = st.phase_masks()
+            moved = np.linalg.norm([d * k * s for d, k, s in zip(m.shift, m.steps, st.vol.spacing)])
+            note = f"Other phase: {st.partner.description}."
+            if moved > 0:
+                note += f" The patient moved {moved:.1f} mm between the phases (corrected)."
+            if m.late:
+                note += (" Both series came after the arterial peak (sinuses and arteries equally bright on each), so"
+                         " anatomy decided: " + ("in the head, the vessel atlas (where arteries and veins run in other"
+                         " heads, matched by the skull); " if m.atlas else "veins from the traced sinuses, ") +
+                         "in the neck the lateral vessels are veins and the medial ones arteries, and the aorta is an"
+                         " artery. Small vessels against the skull may be wrong.")
+        else:
+            st.artery_mask()                            # the tracing ran with the render copy; this is its result
+            ml = st.sinus_ml or 0.0
+            sinuses = (f"Blue: the dural sinuses traced by anatomy ({ml:.0f} ml) — superior sagittal, straight, "
+                       "transverse, sigmoid; often only part of them." if ml > 0 else
+                       "No dural sinus could be traced in this series.")
+            if st.atlas_used:
+                note = ("One series. In the head, arteries (red) and veins (blue) by the vessel atlas: where they run in"
+                        " other heads, matched to this skull, with this series' own HU. Large vessels are reliable;"
+                        " small vessels against the skull may be wrong. Arterial + venous series of one study separate"
+                        " best.")
+            elif st.phase == "arterial":
+                note = (f"One arterial series. {sinuses} Other veins are told from arteries only by being less bright. "
+                        "A venous series of the same study gives a true separation.")
+            else:
+                note = (f"One series. {sinuses} Red: every other vessel — arteries and smaller veins together, "
+                        "as one contrast series cannot tell them apart. Arterial + venous series give a true separation.")
+        self.phase_note.setText(note)
+        self.phase_note.setVisible(bool(note))
+
+    def _on_phase_changed(self, *_):
+        st = self.state
+        st.phase_mode = self.phase_combo.currentData()
+        st.combine_phases = self.combine_chk.isChecked()
+        st.encode_bone = None   # force recompute
+        self._update_encoding()
+        self._show_bone_marker()
+        self.apply_tf()
 
     def _on_bone_changed(self, *_):
         st = self.state
@@ -876,13 +1008,55 @@ class VRWindow(QMainWindow):
 
     def _on_preset_selected(self, idx):
         kind, val = self.preset_combo.itemData(idx)
+        st = self.state
         if kind == "builtin":
+            val = st.fit_bone_curves(val)      # bone from the plain scan: thin bone shows too
+        veins =st.vol.modality == "CT" and any(c.layer == "vein" for c in val.curves) if kind == "builtin" else False
+        if veins and val.venography:
+            # reading the study's plain scan and finding the vessels takes seconds: a wait panel
+            self._busy = BusyDialog(self, "Venography")
+            try:
+                self._busy.run("Reading the plain scan of this study (and lining it up)...", st.plain_data)
+                self.set_tf(val)
+                self.apply_tf()
+            finally:
+                self._busy.close()
+                self._busy = None
+        elif veins:
+            # seconds of work (fitting the curves, separating the phases): a wait panel, not a frozen window
+            self._busy = BusyDialog(self, "Arteries / veins")
+            try:
+                if st.partner is None and st.phase != "arterial":
+                    # a routine contrast CT: the curves where its vessels are
+                    val = self._busy.run("Finding this scan's vessel HU...", st.fit_contrast_preset, val)
+                self.set_tf(val)
+                self.apply_tf()
+            finally:
+                self._busy.close()
+                self._busy = None
+            if not st.paired and st.phase != "venous":
+                self._venous_notice()
+        elif kind == "builtin":
             self.set_tf(val)
         else:
             try:
                 self.set_tf(tf_model.TransferFunction.load(val), val)
             except Exception as ex:  # noqa: BLE001
                 QMessageBox.warning(self, "Could not load preset", str(ex))
+
+    def _venous_notice(self):
+        """Arteries / veins chosen on a series that is no venous CTA: say once that one would be more accurate."""
+        msg = ("Arteries (red) and veins (blue) from this one series are an estimate: the vessel atlas and the traced "
+               "sinuses, by anatomy.\n\nThey are MORE accurate on the venous series of a CTA: open 3D from the venous "
+               "series (with its arterial series in the same study) for a true separation of the two phases.")
+        self.statusBar().showMessage("Arteries / veins are more accurate on the venous series of a CTA.", 15000)
+        if getattr(self, "_venous_told", False):
+            return
+        self._venous_told = True
+        box = QMessageBox(QMessageBox.Information, "Arteries / veins from one series", msg, QMessageBox.Ok, self)
+        box.setModal(False)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.show()
 
     def _save_preset(self):
         if self.current_preset_path:
@@ -968,54 +1142,17 @@ class VRWindow(QMainWindow):
         if seg is not None and seg.seed is not None and seg in self.state.segments:
             self.seed(*seg.seed, replace=seg)
 
-    # seed range editor: re-grow in a thread, newest request wins, so dragging stays smooth
-    def _on_seed_range(self, lo, hi):
-        self._range_want = (lo, hi)
-        if self._range_job is None:
-            self._range_start()
+    # seed range: the grower is shared with the 2D panel, so a drag in either moves both
+    def _grow_params(self):
+        return (self.seg_leak.value(), self.vr.crop_bounds_ijk() if self.seg_crop.isChecked() else None,
+                1.0 if self.seg_smooth.isChecked() else 0.0)
 
-    def _range_start(self):
-        st = self.state
-        seg = st.active_segment
-        lo, hi = self._range_want
-        self._range_want = None
-        if seg is None or seg.seed is None:
-            return
-        leak = self.seg_leak.value()
-        bounds = self.vr.crop_bounds_ijk() if self.seg_crop.isChecked() else None
-        smooth = 1.0 if self.seg_smooth.isChecked() else 0.0
-        job = {"seg": seg, "lo": lo, "hi": hi, "new": None}
-
-        def work():
-            mask = region_grow(st.vol.data, st.vol.spacing, seg.seed, lo, hi, leak, bounds, 70.0, smooth)
-            if mask is not None:
-                job["new"] = Segment(seg.name, mask[0], mask[1], st.vol.shape, seg.color, st.vol.spacing)
-
-        job["thread"] = threading.Thread(target=work, daemon=True)
-        self._range_job = job
-        job["thread"].start()
-        self._range_timer.start()
-
-    def _range_poll(self):
-        job = self._range_job
-        if job is None or job["thread"].is_alive():
-            return
-        self._range_timer.stop()
-        self._range_job = None
-        st, old, new = self.state, job["seg"], job["new"]
-        if new is not None and old in st.segments:
-            new.range = (job["lo"], job["hi"])
-            new.seed = old.seed
-            new.visible, new.opacity = old.visible, old.opacity
-            st.segments[st.segments.index(old)] = new
-            st.active_segment = new
-            self._refresh_seg_list(select=new)
-            self.vr.sync_segments()
-            self.segmentsChanged.emit(st)
-            self.statusBar().showMessage(f"Segment '{new.name}': {new.volume_ml:.2f} ml "
-                                         f"({job['lo']:.0f}…{job['hi']:.0f})", 8000)
-        if self._range_want is not None:
-            self._range_start()
+    def _on_grown(self, _old, new):
+        self._refresh_seg_list(select=new)
+        self.vr.sync_segments()
+        self.segmentsChanged.emit(self.state)
+        self.statusBar().showMessage(f"Segment '{new.name}': {new.volume_ml:.2f} ml "
+                                     f"({new.range[0]:.0f}…{new.range[1]:.0f})", 8000)
 
     def _seed(self, z, y, x, busy, replace=None):
         st = self.state
@@ -1027,9 +1164,10 @@ class VRWindow(QMainWindow):
         grow_msg = "Growing the region from the clicked point..."
         self.setCursor(Qt.WaitCursor)
         try:
+            ct = st.vol.modality == "CT"
             if mode == "auto":
                 mask, (lo, hi) = busy.run(grow_msg, auto_grow, st.vol.data, st.vol.spacing, (z, y, x),
-                                          self.seg_k.value(), leak, bounds, smooth)
+                                          self.seg_k.value(), leak, bounds, smooth, ct)
             else:
                 if mode == "tol":
                     lo, hi = val - self.seg_tol.value(), val + self.seg_tol.value()
@@ -1052,7 +1190,7 @@ class VRWindow(QMainWindow):
                     if r != QMessageBox.Yes:
                         return
                     mask, (lo, hi) = busy.run(grow_msg, auto_grow, st.vol.data, st.vol.spacing, (z, y, x),
-                                              self.seg_k.value(), leak, bounds, smooth)
+                                              self.seg_k.value(), leak, bounds, smooth, ct)
                 else:
                     mask = busy.run(grow_msg, region_grow, st.vol.data, st.vol.spacing, (z, y, x), lo, hi, leak,
                                     bounds, 70.0, smooth)
@@ -1182,6 +1320,8 @@ class VRWindow(QMainWindow):
             self.vr.sync_segments()
 
     def closeEvent(self, e):
+        self.grower.grown.disconnect(self._on_grown)
+        self.grower.params = lambda: (ANTI_LEAK_MM, None, 0.0)
         self.vr.set_scalpel(None)
         self.vr.shutdown()
         self.state.release_3d()

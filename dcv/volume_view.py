@@ -532,7 +532,7 @@ class VolumeView(QWidget):
         # area is stored mirrored as -OFF - HU (bone curves only), with a transparent gap between the two domains.
         # Sent to VTK in one call each: adding thousands of points one by one cost ~0.25 s per curve drag step.
         x0, x1 = (-BONE_OFFSET - hi if bone else lo), (VEIN_OFFSET + 3000 if vein else hi)
-        n = int(np.clip(x1 - x0 + 1, 1024, 32768))
+        n = int(np.clip(x1 - x0 + 1, 1024, 16384))      # 16384: the largest lookup texture of many drivers (AMD Radeon)
         xs = np.linspace(x0, x1, n)
         alpha = np.zeros(n)
         rgb = np.zeros((n, 3))

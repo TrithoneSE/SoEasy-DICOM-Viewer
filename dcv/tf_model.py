@@ -90,6 +90,9 @@ class TransferFunction:
     specular_power: float = 15.0
     background: tuple = (0.0, 0.0, 0.0)
     edge_threshold: float = 60.0    # gradient (HU, as VTK measures it) above which hide_edges curves stop coloring
+    # True = the "vein" curves color the inside of the skull (brain and its vessels) instead of separated veins
+    # (venography.py)
+    venography: bool = False
 
     def curve_samples(self, xs, layer=None):
         """[(opacity, rgb, hide_edges)] of each curve at xs; layer None = all curves, 'normal' / 'bone' = that layer."""
@@ -123,6 +126,7 @@ class TransferFunction:
             specular_power=d.get("specular_power", 15.0),
             background=tuple(d.get("background", (0, 0, 0))),
             edge_threshold=d.get("edge_threshold", 60.0),
+            venography=bool(d.get("venography", False)),
         )
         for c in d.get("curves", []):
             name = c.get("name", "Curve")
@@ -144,9 +148,48 @@ class TransferFunction:
             return TransferFunction.from_dict(json.load(f))
 
 
-def _c(name, pts, hide_edges=False):
+def fit_vessel_curves(tf, floor, peak):
+    """A copy of an arteries / veins preset with its two vessel curves moved onto one scan's vessels: starting at floor
+    (the scan's vessel threshold), a fifth of the way up halfway to peak (the sinuses' median HU), full from peak on. A
+    routine contrast head CT's sinuses hold ~100-140 HU (real CTs), where the CTA curves are still nearly clear."""
+    out = tf.copy()
+    mid = 0.5 * (floor + peak)
+    for c in out.curves:
+        if c.name not in ("Veins", "Arteries"):
+            continue
+        lo, hi = c.points[0].color, c.points[-1].color
+        end = c.points[-2].x
+        c.points = [TFPoint(floor, 0.0, lo), TFPoint(mid, 0.2, lo), TFPoint(max(peak, mid + 10), 0.45, hi),
+                    TFPoint(max(end, peak + 20), 0.45, hi), TFPoint(max(end, peak + 20) + 100, 0.0, hi)]
+    out.name = tf.name.replace("CT Angio", "Contrast CT") + " (fitted)"
+    return out
+
+
+def fit_bone_curves(tf, start):
+    """A copy of tf with the rise of each bone curve moved down to start HU, when it starts higher; the venography
+    keeps its own. For a bone area taken from the plain scan (segment.VolumeState.bone_source): all of it is bone, a
+    child's thin bone too, which the presets' 380-450 HU left out (real infant CT: holes in the spine and face)."""
+    out = tf.copy()
+    if getattr(tf, "venography", False):
+        return out
+    for c in out.curves:
+        if c.layer != "bone" or len(c.points) < 3 or c.points[0].x <= start:
+            continue
+        shift = start - c.points[0].x
+        c.points[0].x = start
+        c.points[1].x = min(c.points[1].x + shift, c.points[2].x - 1)
+    return out
+
+
+def unchanged_builtin(tf):
+    """tf is one of the built-in presets as it comes."""
+    d = tf.to_dict()
+    return any(p.to_dict() == d for p in builtin_presets())
+
+
+def _c(name, pts, hide_edges=False, layer=None):
     """pts: list (x, y, (r,g,b) 0..255)."""
-    return TFCurve(name, [TFPoint(x, y, tuple(v / 255 for v in col)) for x, y, col in pts], _guess_layer(name),
+    return TFCurve(name, [TFPoint(x, y, tuple(v / 255 for v in col)) for x, y, col in pts], layer or _guess_layer(name),
                    hide_edges)
 
 
@@ -159,6 +202,11 @@ VEIN_HI = (80, 130, 255)
 SKIN = (225, 160, 120)
 MUSCLE = (190, 70, 60)
 FAT = (240, 210, 120)
+BRAIN = (235, 235, 250)
+VENO = (30, 60, 220)
+VENO_HI = (70, 120, 255)
+SCALP = (230, 200, 70)
+BONE_FAINT = (220, 220, 215)
 
 
 def builtin_presets() -> list[TransferFunction]:
@@ -204,6 +252,17 @@ def builtin_presets() -> list[TransferFunction]:
                     (-450, 0.0, (230, 230, 255))]),
         _c("Bone", [(250, 0, IVORY), (500, 0.4, IVORY), (3000, 0.85, BONE_HI)]),
     ]))
+    # A contrast head CT's veins over a faint brain, skull and skin (venography.py): the "vein" layer is the inside of
+    # the skull here, so brain and vessels have curves of their own; the scalp and the face keep the normal layer.
+    p.append(TransferFunction("CT Venography (contrast CT)", [
+        _c("Brain", [(10, 0, BRAIN), (25, 0.004, BRAIN), (40, 0.006, BRAIN), (55, 0.0, BRAIN)], layer="vein"),
+        _c("Veins", [(60, 0, VENO), (80, 0.35, VENO), (110, 0.85, VENO_HI), (600, 0.9, VENO_HI), (700, 0.0, VENO_HI)]),
+        # from 70 HU: what is no vessel there is stored at 69 (venography.encode)
+        _c("Vessels outside the skull", [(70, 0, VENO), (90, 0.35, VENO), (120, 0.85, VENO_HI), (600, 0.9, VENO_HI),
+                                         (700, 0.0, VENO_HI)], layer="normal"),
+        _c("Skin", [(-600, 0, SCALP), (-400, 0.03, SCALP), (-200, 0.03, SCALP), (-120, 0.0, SCALP)]),
+        _c("Bone", [(300, 0, BONE_FAINT), (600, 0.02, BONE_FAINT), (1200, 0.035, BONE_FAINT), (3000, 0.05, BONE_FAINT)]),
+    ], venography=True))
     return p
 
 

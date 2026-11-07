@@ -325,7 +325,7 @@ export function mprHooks(m: MPRModel, kind: Kind, vp: Viewport, settle: () => vo
     for (const l of ls) {
       for (const s of [1, -1]) if (Math.hypot(x - (l.cx + s * l.dx * hd), y - (l.cy + s * l.dy * hd)) < 10 * k) return { what: "rotate", other: l.other };
     }
-    if (vp.tool === "length") return null;          // with the length tool a line press starts a measurement
+    if (vp.tool === "length" || vp.tool === "polyline") return null;    // with these a line press starts a measurement
     for (const l of ls) if (Math.abs((x - l.cx) * l.dy - (y - l.cy) * l.dx) < 5 * k) return { what: "move", other: l.other };
     return null;
   };

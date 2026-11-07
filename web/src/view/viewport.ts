@@ -57,7 +57,7 @@ export interface ViewHooks {
 
 export type Tool = "wl" | "pan" | "zoom" | "scroll" | MeasureKind | "locate" | "seed" | "dsaShift" | "dsaAuto";
 
-const isMeasure = (t: Tool): t is MeasureKind => t === "length" || t === "ellipse" || t === "angle" || t === "cobb";
+const isMeasure = (t: Tool): t is MeasureKind => t === "length" || t === "polyline" || t === "ellipse" || t === "angle" || t === "cobb";
 
 interface Single {
   tool: Tool;
@@ -108,6 +108,7 @@ export class Viewport {
   selected: Measurement | null = null;
   /** An angle / Cobb that still needs points: the next press continues it. */
   private draft: Measurement | null = null;
+  private capDrag: { m: Measurement; x: number; y: number; off: [number, number] } | null = null;
 
   cinePlaying = false;
   fps = 10;
@@ -440,6 +441,20 @@ export class Viewport {
       this.onSeed(...this.toImage(x, y));
       return;
     }
+    // a caption can be dragged out of the way with any tool, also on an MPR axis
+    if (e.pointerType !== "mouse" || e.button === 0) {
+      const m = (this.measurements.get(this.mkey()) ?? []).slice().reverse().find((q) => {
+        const b = q.capBox;
+        return b && x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
+      });
+      if (m && m !== this.draft) {
+        this.selected = m;
+        this.capDrag = { m, x, y, off: m.capOffset ?? [0, 0] };
+        this.requestRender();
+        this.onChange();
+        return;
+      }
+    }
     if ((e.pointerType !== "mouse" || e.button === 0) && this.hooks.down?.(x, y, e)) {
       this.hookDrag = true;
       return;
@@ -470,6 +485,12 @@ export class Viewport {
       return;
     }
     this.pointers.set(e.pointerId, { x, y, type: e.pointerType });
+    if (this.capDrag) {
+      const c = this.capDrag;
+      c.m.capOffset = [c.off[0] + x - c.x, c.off[1] + y - c.y];
+      this.requestRender();
+      return;
+    }
     if (this.pinch && this.pointers.size >= 2) {
       const [p, q] = [...this.pointers.values()];
       const mid: [number, number] = [(p.x + q.x) / 2, (p.y + q.y) / 2];
@@ -518,7 +539,7 @@ export class Viewport {
         }
         break;
       }
-      case "length": case "ellipse": case "angle": case "cobb":
+      case "length": case "polyline": case "ellipse": case "angle": case "cobb":
         if (s.edit) {
           const p = this.toImage(x, y);
           if (s.edit.idx < 0) {
@@ -550,6 +571,7 @@ export class Viewport {
     if (!this.pointers.has(e.pointerId)) return;
     const [x, y] = this.pos(e);
     this.pointers.delete(e.pointerId);
+    this.capDrag = null;
     if (this.pinch) {
       if (this.pointers.size < 2) this.pinch = null;
     }
@@ -627,6 +649,10 @@ export class Viewport {
     if (d && (d.kind !== kind || !list.includes(d))) this.cancelDraft();     // the draft stayed on another image
     const draft = this.draft;
     if (draft) {
+      if (draft.kind === "polyline") {                       // a second tap on the last point (a double tap) ends it
+        const [lx, ly] = this.toScreen(...draft.pts[draft.pts.length - 1]);
+        if (Math.hypot(lx - x, ly - y) < (type === "mouse" ? 6 : 16) && this.finishDraft()) return;
+      }
       const orig = draft.pts.map((q) => [...q] as [number, number]);
       if (draft.kind === "cobb" && draft.pts.length === 2) draft.pts.push(p);
       draft.pts.push([...p]);
@@ -684,12 +710,12 @@ export class Viewport {
       return;
     }
     if (this.draft !== m) return;
-    if (tap && (edit.idx === 1 || edit.idx === 3)) m.pts.pop();    // a tap placed one point: the next one follows
+    if (tap && (edit.idx === 1 || (edit.idx === 3 && m.kind !== "polyline"))) m.pts.pop();  // a tap placed one point: the next one follows
     if (m.pts.length >= need) {
       this.draft = null;
       return;
     }
-    this.onStatus(m.kind === "angle" ? (m.pts.length === 1 ? "Angle: now the vertex" : "Angle: now the end of the second arm")
+    this.onStatus(m.kind === "polyline" ? "Open polygon: next point; double tap or Enter ends it" : m.kind === "angle" ? (m.pts.length === 1 ? "Angle: now the vertex" : "Angle: now the end of the second arm")
       : m.pts.length < 3 ? (m.pts.length === 1 ? "Cobb: now the end of the first line" : "Cobb: now draw the second line") : "Cobb: now the end of the second line");
   }
 
@@ -697,10 +723,29 @@ export class Viewport {
     return this.vol?.measureKey?.(this.index) ?? this.index;
   }
 
-  /** Drop an angle / Cobb that was not finished (another tool, Esc). */
+  /** End an open polygon here. True when there was one to end. */
+  finishDraft(): boolean {
+    const d = this.draft;
+    if (d?.kind !== "polyline") return false;
+    if (d.pts.length < 2) {
+      this.cancelDraft();
+      return true;
+    }
+    this.draft = null;
+    this.requestRender();
+    this.onChange();
+    return true;
+  }
+
+  /** Drop an angle / Cobb that was not finished (another tool, Esc); an open polygon keeps what it has. */
   cancelDraft(): void {
     const d = this.draft;
     if (!d) return;
+    if (d.kind === "polyline" && d.pts.length >= 2) {
+      this.draft = null;
+      this.requestRender();
+      return;
+    }
     this.draft = null;
     for (const list of this.measurements.values()) {
       const i = list.indexOf(d);
@@ -952,7 +997,20 @@ export class Viewport {
       let tx = Math.max(...xs) + 10;
       if (tx + w > cw - 2) tx = Math.max(2, Math.min(...xs) - w - 10);
       if (tx + w > cw - 2) tx = Math.max(2, cw - w - 2);
-      const ty = Math.max(2, Math.min(ch - h - 2, (Math.min(...ys) + Math.max(...ys)) / 2 - h / 2));
+      let ty = Math.max(2, Math.min(ch - h - 2, (Math.min(...ys) + Math.max(...ys)) / 2 - h / 2));
+      if (m.capOffset) {
+        // moved by hand: stays inside the view, with a thin line back to what it measures
+        const ax = xs[xs.length - 1], ay = ys[ys.length - 1];
+        tx = Math.max(2, Math.min(cw - w - 2, tx + m.capOffset[0]));
+        ty = Math.max(2, Math.min(ch - h - 2, ty + m.capOffset[1]));
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(Math.max(tx, Math.min(tx + w, ax)), Math.max(ty, Math.min(ty + h, ay)));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      m.capBox = [tx, ty, w, h];
       ctx.fillStyle = "rgba(0,0,0,0.6)";
       ctx.fillRect(tx, ty, w, h);
       lines.forEach((t, i) => shadowText(ctx, t, tx + 4, ty + 14 + i * lh, col));

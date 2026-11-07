@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetAction,
 )
 
-from . import privacy, theme
+from . import privacy, tf_model, theme
 from .archive import ARCHIVE_EXT, is_archive
 from .busy import BusyDialog
 from .dti import fit_tensor, load_dwi
@@ -32,13 +32,17 @@ from .icons import icon
 from .loader import SeriesInfo, load_series, scan_folder
 from .measure import TOOL_NAMES
 from .mpr_window import MPRWindow
-from .segment import VolumeState
+from .phases import has_contrast_name, is_phase_pair, phase_of_name, pooled_native
+from .seed_range import SeedPanel, grower_of
+from .segment import ANTI_LEAK_MM, Segment, VolumeState, auto_grow
 from .slice_view import COLORMAPS, FILTERS, TF_COLORMAP, SliceView
 from .tools import BASIC_TOOLS, EXTRA_TOOLS, MEASURE_ORDER, ToolBank, abc2_dialog
 from .tract_window import TractWindow
 from .ui import cmap_icon
 from .viewport import SERIES_MIME, ViewportFrame
 from .vr_window import VRWindow
+
+NEW_SEGMENT_COLORS = ((0.1, 0.9, 0.2), (1.0, 0.8, 0.1), (0.2, 0.8, 1.0), (1.0, 0.4, 0.8), (0.7, 0.5, 1.0))
 
 # data folder keeps the old internal name: the user's presets live there
 APPDIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "DicomColorViewer")
@@ -403,6 +407,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(theme.main_stylesheet())
         os.makedirs(APPDIR, exist_ok=True)
         self.series = {}
+        self.seed_panel = None
         self.states = {}
         self._threads = []
         self.viewports = []
@@ -894,25 +899,149 @@ class MainWindow(QMainWindow):
             if own:
                 busy = BusyDialog(self, "Opening 3D")
             try:
+                if state.plain_loader is None:
+                    state.plain_loader = lambda st=state: self._plain_series(st)
+                busy.run("Reading the other phase of this CTA...", self._attach_phase_partner, state)
+                busy.run("Looking for contrast in the head...", self._default_vein_preset, state)
+                if state.bone_lock or state.venography or getattr(state.tf, "venography", False):
+                    # the bone lock takes its bone from it (VolumeState.bone_source), the venography its vessels
+                    busy.run("Reading the plain scan of this study (and lining it up)...", state.plain_data)
+                if tf_model.unchanged_builtin(state.tf):
+                    state.tf = state.fit_bone_curves(state.tf)
+
                 def prepare():                    # the slow part of opening 3D, off the GUI thread
                     state.encode_bone = state.bone_lock
                     state.encode_veins = any(c.layer == "vein" for c in state.tf.curves)
                     if state.encode_bone:
                         state.bone_region()
                     state.update_render_data()
-                busy.run("Preparing the 3D volume (bone area, render copy)...", prepare)
+                busy.run("Preparing the 3D volume (bone area, arteries, veins)...", prepare)
                 busy.stage("Uploading the volume to the graphics card...")
                 w = VRWindow(state)
             finally:
                 if own:
                     busy.close()
             w.tfChanged.connect(self._on_tf_changed)
-            w.segmentsChanged.connect(lambda st: self._all_slices(lambda v: v.invalidate(), st))
+            w.segmentsChanged.connect(self._on_segments_changed)
             w.closed.connect(self._on_vr_closed)
             self.vr_windows[id(state)] = w
         if show and not w.isVisible():
             w.show()
         return w
+
+    def _phase_candidate(self, st):
+        """The series of the same study that is the other phase of this CTA: by name, else by the time it was scanned."""
+        info = self.series.get(st.vol.uid)
+        if info is None or st.vol.modality != "CT":
+            return None
+        same = [s for s in self.series.values() if s.uid != info.uid and s.study_uid == info.study_uid
+                and s.modality == "CT" and s.count == info.count and s.derived is None]
+        own = st.phase
+        if own == "native":
+            return None
+        if own in ("arterial", "venous"):
+            want = "venous" if own == "arterial" else "arterial"
+            named = [s for s in same if phase_of_name(s.description) == want]
+            if named:
+                return named[0]
+        rest = [s for s in same if phase_of_name(s.description) is None]
+        # "Head + CM" next to plain "Head": one has contrast, the other not; that is no pair of phases
+        if has_contrast_name(info.description) or any(has_contrast_name(s.description) for s in rest):
+            rest = [s for s in rest if has_contrast_name(s.description) == has_contrast_name(info.description)]
+        return self._order_by_time(st, info, rest[0]) if len(rest) == 1 else None
+
+    @staticmethod
+    def _order_by_time(st, info, other):
+        """Two series without a phase in their names: the earlier one is arterial."""
+        def when(s):
+            ds = pydicom.dcmread(s.middle_file(), stop_before_pixels=True, specific_tags=["AcquisitionTime", "SeriesTime"])
+            return str(ds.get("AcquisitionTime") or ds.get("SeriesTime") or "")
+        try:
+            a, b = when(info), when(other)
+        except Exception:  # noqa: BLE001 - no usable header: leave it as one series
+            return None
+        if not a or not b or a == b:
+            return None
+        if st.phase is None:
+            st.phase_name = "arterial" if a < b else "venous"
+        return other
+
+    def _attach_phase_partner(self, st):
+        """Give a CTA series its other phase, when the study has one on exactly the same grid and memory allows."""
+        from .segment import free_ram_mb
+        if st.partner is not None:
+            return
+        cand = self._phase_candidate(st)
+        if cand is None:
+            return
+        if free_ram_mb() < st.vol.data.nbytes / 2 ** 20 * 2.5:      # the second series, its masks, and room to spare
+            return
+        loaded = self.states.get(cand.uid)
+        other = loaded.vol if loaded is not None else load_series(cand)
+        v = st.vol
+        if other.data.shape == v.data.shape and other.frame_uid == v.frame_uid \
+                and np.allclose(other.spacing, v.spacing, atol=0.01) and np.allclose(other.origin, v.origin, atol=0.5) \
+                and is_phase_pair(v.data, other.data, v.spacing):
+            st.partner = other
+            info = self.series.get(v.uid)
+            for s in self.series.values():
+                if s.study_uid == info.study_uid and s.modality == "CT" and s.count == info.count \
+                        and phase_of_name(s.description) == "native":
+                    done = self.states.get(s.uid)
+                    nat = done.vol if done is not None else load_series(s)
+                    if nat.data.shape == v.data.shape and np.allclose(nat.origin, v.origin, atol=0.5):
+                        st.native = pooled_native(nat.data, v.spacing)
+                    break
+
+    def _plain_series(self, st):
+        """The plain (pre-contrast) scan of a contrast CT's study, read for the venography preset: named so (NC, PRE,
+        native...), or the one series without a contrast word next to this '+ CM' one. Any field of view or tilt: it
+        is mapped to this grid by patient coordinates (venography.plain_on_grid). None when there is none."""
+        from .segment import free_ram_mb
+        info = self.series.get(st.vol.uid)
+        if info is None or st.vol.modality != "CT" or st.phase == "native":
+            return None
+        same = [s for s in self.series.values() if s.uid != info.uid and s.study_uid == info.study_uid
+                and s.modality == "CT" and s.derived is None and s.count >= 0.5 * info.count]
+        named = [s for s in same if phase_of_name(s.description) == "native"]
+        plain = named or [s for s in same if has_contrast_name(info.description) and phase_of_name(s.description) is None
+                          and not has_contrast_name(s.description)]
+        if not plain:
+            return None
+        if free_ram_mb() < st.vol.data.nbytes / 2 ** 20 * 3:
+            return None
+        plain.sort(key=lambda s: abs(s.count - info.count))
+        done = self.states.get(plain[0].uid)
+        return done.vol if done is not None else load_series(plain[0])
+
+    @staticmethod
+    def _default_vein_preset(st):
+        """The preset 3D opens on, only from the CT default (Vessels + Bone), never over one the user chose:
+        - the venous series of a CTA with its arterial series: Arteries / Veins (both phases separate them);
+        - one venous or delayed series with contrast in the head, or a newborn's head (VolumeState.thin_skull): the
+          venography (venography.py). On a newborn the default coloured the whole skull as vessels (real CT: its plates
+          are 150-450 HU);
+        - anything else (an arterial CTA, a routine '+ CM' head CT) stays on Vessels + Bone; the venography is a choice
+          of the preset list there."""
+        from .phases import CONTRAST_TOP_HU, intracranial_top_of
+        from .tf_model import builtin_presets
+        if st.vol.modality != "CT" or st.tf.name != "CT Angio - Vessels + Bone":
+            return
+        presets = builtin_presets()
+        if st.partner is not None:
+            if st.phase == "venous":
+                st.tf = next(p for p in presets if p.name == "CT Angio - Arteries / Veins + Bone").copy()
+            return
+        if st.phase == "arterial":
+            return
+        if st.phase == "venous":
+            mean, top, sp = st._coarse_data()
+            t = intracranial_top_of(mean, top, sp)
+            venous = t is None or t >= CONTRAST_TOP_HU      # None: no skull this rule can read, as a newborn's
+        else:
+            venous = False
+        if venous or st.thin_skull:
+            st.tf = next(p for p in presets if p.venography).copy()
 
     def closeEvent(self, e):
         if self in MainWindow.windows:
@@ -1014,12 +1143,70 @@ class MainWindow(QMainWindow):
         self._all_slices(lambda v: v.set_tf_table(table), state)
 
     def _on_seed(self, state, z, y, x):
+        """A seed needs no 3D: it grows here, the curve opens in 2D, and *Show in 3D* in that panel is the slow step."""
         busy = BusyDialog(self, "Segmenting")
         try:
-            w = self.vr_window(state, busy=busy)
-            w.seed(z, y, x, busy=busy)
+            w = self.vr_windows.get(id(state))
+            if w is not None:
+                w.seed(z, y, x, busy=busy)
+            else:
+                self._seed_2d(state, z, y, x, busy)
         finally:
             busy.close()
+        self._show_seed_panel(state)
+
+    def _seed_2d(self, st, z, y, x, busy):
+        res, (lo, hi) = busy.run("Growing the region from the clicked point...", auto_grow, st.vol.data, st.vol.spacing,
+                                 (z, y, x), 2.5, ANTI_LEAK_MM, None, 0.0, st.vol.modality == "CT")
+        busy.hide()
+        if res is None:
+            QMessageBox.information(self, "Empty", "No voxels were segmented.")
+            return
+        n = len(st.segments)
+        seg = Segment(f"Segment {n + 1}", res[0], res[1], st.vol.shape, NEW_SEGMENT_COLORS[n % len(NEW_SEGMENT_COLORS)],
+                      st.vol.spacing)
+        seg.range, seg.seed = (lo, hi), (z, y, x)
+        st.segments.append(seg)
+        st.active_segment = seg
+        self._all_slices(lambda v: v.invalidate(), st)
+        if seg.volume_ml > 300:
+            QMessageBox.warning(self, "Very large segment", "The segment is very large and probably leaked into other "
+                                "structures.\nMove the left handle of the curve to the right.")
+
+    def _show_seed_panel(self, state):
+        if self.seed_panel is None:
+            self.seed_panel = SeedPanel(self)
+            self.seed_panel.show3d.connect(self._seed_to_3d)
+            self.seed_panel.changed.connect(self._on_panel_changed)
+        self.seed_panel.follow(state, grower_of(state))
+        if state.active_segment is not None and state.active_segment.seed is not None \
+                and not self.seed_panel.isVisible():
+            self.seed_panel.show()
+
+    def _seed_to_3d(self, state):
+        self.setCursor(Qt.WaitCursor)
+        try:
+            w = self.vr_window(state)
+        finally:
+            self.unsetCursor()
+        w._refresh_seg_list()
+        w.vr.sync_segments()
+        w.tabs.setCurrentIndex(1)
+        w.raise_()
+        w.activateWindow()
+
+    def _on_panel_changed(self, state):
+        """The panel changed a segment: the slices follow, and the 3D window if there is one."""
+        self._all_slices(lambda v: v.invalidate(), state)
+        w = self.vr_windows.get(id(state))
+        if w is not None:
+            w._refresh_seg_list()
+            w.vr.sync_segments()
+
+    def _on_segments_changed(self, state):
+        self._all_slices(lambda v: v.invalidate(), state)
+        if self.seed_panel is not None and self.seed_panel.state is state:
+            self.seed_panel.sync()
 
     def _on_eyedropper(self, state, z, y, x):
         self.vr_window(state).add_eyedropper_curve(z, y, x)

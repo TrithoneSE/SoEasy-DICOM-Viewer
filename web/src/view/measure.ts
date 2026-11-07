@@ -31,15 +31,27 @@ export function lengthMm(m: Length, spacing: [number, number]): number {
   return Math.hypot((m.b[0] - m.a[0]) * spacing[0], (m.b[1] - m.a[1]) * spacing[1]);
 }
 
-export type MeasureKind = "length" | "ellipse" | "angle" | "cobb";
+export type MeasureKind = "length" | "polyline" | "ellipse" | "angle" | "cobb";
 
-/** Points each tool needs: a line, the ellipse's two corners, angle = arm, vertex, arm; Cobb = two lines. */
-export const REQUIRED: Record<MeasureKind, number> = { length: 2, ellipse: 2, angle: 3, cobb: 4 };
+/** Points each tool needs: a line, the ellipse's two corners, angle = arm, vertex, arm; Cobb = two lines; an open polygon
+ *  as many as it gets, until a double tap or Enter. */
+export const REQUIRED: Record<MeasureKind, number> = { length: 2, polyline: Infinity, ellipse: 2, angle: 3, cobb: 4 };
 
 export interface Measurement {
   kind: MeasureKind;
   pts: [number, number][];       // (row, column), continuous image coordinates (pixel i spans i..i + 1)
   stats?: { key: string; value: RoiStats | null };
+  /** The caption dragged away from its place, in screen pixels (null = beside the measurement). */
+  capOffset?: [number, number];
+  /** Where the caption was last drawn: left, top, width, height in screen pixels. */
+  capBox?: [number, number, number, number];
+}
+
+/** Length of an open polygon in mm. */
+export function polylineMm(P: [number, number][], sr: number, sc: number): number {
+  let sum = 0;
+  for (let i = 1; i < P.length; i++) sum += Math.hypot((P[i][0] - P[i - 1][0]) * sr, (P[i][1] - P[i - 1][1]) * sc);
+  return sum;
 }
 
 export interface RoiStats {
@@ -105,6 +117,10 @@ export function ellipseStats(plane: ArrayLike<number>, rows: number, cols: numbe
  */
 export function measureLines(m: Measurement, sr: number, sc: number, known: boolean, unit: string, stats: RoiStats | null): string[] {
   const P = m.pts;
+  if (m.kind === "polyline") {
+    if (P.length < 2) return [];
+    return [known ? fmtLen(polylineMm(P, sr, sc)) : `${polylineMm(P, 1, 1).toFixed(1)} px`];
+  }
   if (P.length < REQUIRED[m.kind]) return [];
   switch (m.kind) {
     case "length":

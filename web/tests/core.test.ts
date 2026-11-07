@@ -233,7 +233,7 @@ describe("lazy frame reading (multiframe runs without the whole file in memory)"
       }
       expect(Math.max(...reads)).toBeLessThan(file.length / 4);
     }
-  });
+  }, 30000);          // ~3 s on an idle laptop: the default 5 s was too tight with the CPU busy
 });
 
 describe("volume storage (dcv/loader.py: Int16 when the values fit)", () => {

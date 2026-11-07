@@ -11,7 +11,9 @@ import vtkmodules.vtkRenderingFreeType  # noqa: F401
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
 import vtkmodules.vtkRenderingVolumeOpenGL2  # noqa: F401
 from vtkmodules.util.vtkConstants import VTK_FLOAT, VTK_SHORT, VTK_UNSIGNED_CHAR  # noqa: F401
-from vtkmodules.vtkCommonCore import vtkFileOutputWindow, vtkOutputWindow, vtkPoints, vtkVersion  # noqa: F401
+from vtkmodules.vtkCommonCore import (  # noqa: F401
+    vtkFileOutputWindow, vtkFloatArray, vtkOutputWindow, vtkPoints, vtkVersion,
+)
 from vtkmodules.vtkCommonDataModel import (  # noqa: F401
     vtkCellArray, vtkImageData, vtkPiecewiseFunction, vtkPlanes, vtkPolyData,
 )
@@ -20,7 +22,7 @@ from vtkmodules.vtkCommonTransforms import vtkTransform  # noqa: F401
 from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D, vtkTriangleFilter, vtkTubeFilter  # noqa: F401
 from vtkmodules.vtkFiltersSources import vtkConeSource, vtkPolyLineSource, vtkSphereSource  # noqa: F401
 from vtkmodules.vtkImagingCore import vtkImageCast, vtkImageReslice  # noqa: F401
-from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth  # noqa: F401
+from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth, vtkImageSeparableConvolution  # noqa: F401
 from vtkmodules.vtkImagingMorphological import vtkImageConnectivityFilter  # noqa: F401
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera, vtkInteractorStyleUser  # noqa: F401
 from vtkmodules.vtkInteractionWidgets import (  # noqa: F401

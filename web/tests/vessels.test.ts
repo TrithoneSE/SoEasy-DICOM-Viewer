@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Volume } from "../src/dicom/volume";
 import { ARTERY_TOP_HU, boneAndVessels, boneRegion, encodeVessel, gridStep, unpack, VEIN_MIN_HU, VEIN_OFFSET, vesselMasks, vesselsAwayFromBone, vesselsByPieces } from "../src/vr/bone";
-import { buildTable, builtinPresets, fromDict, usesVeins } from "../src/vr/tf";
+import { buildTable, builtinPresets, fromDict, isVenography, usesVeins } from "../src/vr/tf";
 
 const NZ = 100, NY = 120, NX = 120;
 
@@ -152,8 +152,8 @@ describe("what the owner saw on real CTA", () => {
   });
 
   it("uses the smaller grid earlier on phones and tablets", () => {
-    expect(gridStep(78e6, true)).toBe(2);
-    expect(gridStep(78e6, false)).toBe(1);
+    expect(gridStep(25e6, true)).toBe(2);
+    expect(gridStep(25e6, false)).toBe(1);
     expect(gridStep(157e6, false)).toBe(2);
     expect(gridStep(10e6, true)).toBe(1);
   });
@@ -176,9 +176,10 @@ describe("stored values and curves", () => {
     expect(fromDict({ name: "t", curves: [{ name: "x", layer: "vein", points: pts }] }).curves[0].layer).toBe("vein");
   });
 
-  it("presets: only Arteries / Veins uses the layer; points as on the desktop", () => {
+  it("presets: only Arteries / Veins (and the venography, for the inside of the skull) use the layer; points as on the desktop", () => {
     const P = builtinPresets();
-    expect(P.filter(usesVeins).map((t) => t.name)).toEqual(["CT Angio - Arteries / Veins + Bone"]);
+    expect(P.filter(usesVeins).map((t) => t.name)).toEqual(["CT Angio - Arteries / Veins + Bone", "CT Venography (contrast CT)"]);
+    expect(P.filter(isVenography).map((t) => t.name)).toEqual(["CT Venography (contrast CT)"]);
     const av = P.find(usesVeins)!;
     const xy = (name: string) => av.curves.find((c) => c.name === name)!.points.map((p) => [p.x, p.y]);
     expect(xy("Veins")).toEqual([[100, 0], [140, 0.2], [200, 0.45], [500, 0.45], [600, 0]]);

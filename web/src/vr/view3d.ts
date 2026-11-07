@@ -5,12 +5,16 @@
  */
 import type { Volume } from "../dicom/volume";
 import { add, cross, mulMtV, rot, mulMV, scale, sub, unit, type V3 } from "../geometry";
-import { boneRegion, BONE_OFFSET, CT_FLOOR, gridStep, VEIN_OFFSET, vesselMasks, type BoneRegion, type VesselMasks } from "./bone";
+import { boneGrid, boneRegion, BONE_OFFSET, CT_FLOOR, CTA_TOP_HU, dilateMask, gridStep, maskOnGrid, pack, plainGridOf, unpack, VEIN_OFFSET, vesselMasks, type BoneRegion,
+  type BoneSource, type VesselMasks } from "./bone";
+import { classifyPhases, intracranialTop, phaseOfName, pool, sinusMasks } from "./phases";
 import { cutVoxels, fillLasso } from "./cut";
 import { pickSurface } from "./pick";
 import { fmtLen } from "../view/measure";
 import { contentBox, VolumeRenderer, type Box, type SegmentMask } from "./renderer";
-import { buildTable, builtinPresets, copyTF, genericPreset, RIM_GRAD_MAX, usesVeins, type TransferFunction } from "./tf";
+import { boneCurveFrom, buildTable, builtinPresets, copyTF, fitBoneCurves, fitVesselCurves, genericPreset, isVenography, RIM_GRAD_MAX, unchangedBuiltin, usesVeins,
+  type TransferFunction } from "./tf";
+import { cavity, cavityGrid, MATCH_MIN, plainFor, plainOnVol, thinPlates, thinSkull, venoMasks, type Motion, type VenoMasks } from "./venography";
 
 // ------------------------------------------------------------------ 4×4 matrices (column-major, as WebGL wants)
 function mul4(a: Float32Array, b: Float32Array): Float32Array {
@@ -155,13 +159,45 @@ export type Resolution = "auto" | "full" | "half";
 const MOBILE = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
   || matchMedia("(pointer: coarse)").matches;
 
+// ------------------------------------------------------------------ the bone area in a worker (bone.worker.ts)
+let worker: Worker | null | undefined;
+let boneJobs = 0;
+/** Jobs sent: what to do with their bits (null: the worker failed, make it here). */
+const boneWaiting = new Map<number, (r: WorkerBone | null) => void>();
+
+/** What the bone worker sends back: the bits, and from the plain scan the enhanced cells and the planes it lined up. */
+type WorkerBone = { bits: Uint32Array; enhanced?: Uint32Array; plainPlanes?: number };
+
+function boneWorker(): Worker | null {
+  if (worker !== undefined) return worker;
+  try {
+    worker = new Worker(new URL("./bone.worker.ts", import.meta.url), { type: "module" });
+  } catch {
+    return (worker = null);
+  }
+  worker.onmessage = (e: MessageEvent<{ id: number; bits?: Uint32Array; enhanced?: Uint32Array; plainPlanes?: number; error?: string }>) => {
+    const done = boneWaiting.get(e.data.id);
+    boneWaiting.delete(e.data.id);
+    done?.(e.data.bits ? { bits: e.data.bits, enhanced: e.data.enhanced, plainPlanes: e.data.plainPlanes } : null);
+  };
+  worker.onerror = () => {                       // no module worker here: every job (and the next ones) on this thread
+    worker = null;
+    const jobs = [...boneWaiting.values()];
+    boneWaiting.clear();
+    for (const done of jobs) done(null);
+  };
+  return worker;
+}
+
 /**
  * Bytes of volume texture this device is trusted with at full resolution. Browsers on iOS do not tell the memory;
  * a tab there gets more than 1 GB on any iPhone / iPad of the last years, and the decoded series is in it as well.
  */
 export function gpuLimitBytes(): number {
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  if (ios) return Math.min(screen.width, screen.height) < 600 ? 350e6 : 600e6;
+  // an iPhone: a thin-slice head CT (~100 MB) at full size took long to open and to turn, with nothing more to see on
+  // its screen; Auto opens it at half resolution (Full stays one tap away)
+  if (ios) return Math.min(screen.width, screen.height) < 600 ? 80e6 : 600e6;
   const gb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
   return gb <= 2 ? 200e6 : gb <= 4 ? 500e6 : 1500e6;
 }
@@ -172,6 +208,33 @@ export function resolutionFactor(choice: Resolution, textureBytes: number, limit
   return ranOut || textureBytes > limit ? 2 : 1;
 }
 export const QUALITY: Record<string, number> = { Fast: 1.0, Normal: 0.6, High: 0.35 };   // ray step × smallest spacing
+
+/** The source a bone area was made from: the plain scan when it lined up with any plane, else the rule. */
+function madeFrom(source: BoneSource, plainPlanes: number | undefined, rule: BoneSource): BoneSource {
+  return source === "plain" && !plainPlanes ? rule : source;
+}
+
+/** A newborn's skull plates on the bone grid of step f, made on this thread (no worker). */
+function platesFor(vol: Volume, f: number): Uint8Array {
+  const c = cavityGrid(vol), p = pool(vol.data, vol.cols, vol.rows, vol.n, c.f, c.fz);
+  return maskOnGrid(thinPlates(p.mean, p.top, p.d, c.sp), p.d, c.f, c.fz, [Math.ceil(vol.cols / f), Math.ceil(vol.rows / f), vol.n], f);
+}
+
+/** Where the bone area came from, for the page (dcv/segment.py bone_note). */
+export function boneNote(source: BoneSource): string {
+  if (source === "thin") {
+    return "A newborn's skull: bone from the bone lock threshold and the skull plates by their shape, without the rule for"
+      + " bright vessels (this bone has no dense core). Bone curves start at 150 HU, so the plates show; the fontanelles and"
+      + " sutures stay open.";
+  }
+  if (source === "plain") {
+    return "Bone from the plain scan of this study: what was bone before contrast is bone, and only what got brighter with"
+      + " contrast takes a vessel colour. Bone curves start at 200 HU, so thin bone shows.";
+  }
+  if (source === "cta") return "CTA: bone from the bone lock threshold, without the bright vessels and aneurysms that pass it.";
+  return "No plain scan of this study: bone from the bone lock threshold. Young or thin bone under it, and a vessel against"
+    + " bone, may take the wrong colour; the study's plain scan, opened with it, tells them apart.";
+}
 
 export class VRView {
   readonly renderer: VolumeRenderer;
@@ -196,7 +259,46 @@ export class VRView {
   private vessels: VesselMasks | null = null;
   private vesselKey = "";
   arteryHu: number | null = null;
+  /** The study's plain (pre-contrast) scan, for the venography preset (set by the page before setPreset) and the bone
+   *  lock (bone from it: boneSource 'plain'). */
+  plain: Volume | null = null;
+  /** What the bone area was made from (dcv/segment.py bone_source); null: none yet. */
+  boneSource: BoneSource | null = null;
+  private bonePlain: { of: Volume; data: ArrayLike<number> | null; whole: boolean } | null = null;
+  /** The plain scan pooled on the bone grid (per step f) of `plainGridsOf`: kept when the scan itself is let go
+   *  (releasePlain), so the bone area can be made again from it. */
+  private plainGrids = new Map<number, Int16Array | Float32Array>();
+  private plainGridsOf: Volume | null = null;
+  /** A bone area made before open() (prepareBone): open() takes it, so 3D opens with the bone lock on in one step. */
+  private prepared: { vol: Volume; key: string; bone: BoneRegion; source: BoneSource } | null = null;
+  private ctaOf: { vol: Volume; cta: boolean; thin: boolean } | null = null;
+  /** venography.linesUp of the plain scan (null: none in this patient's coordinates). */
+  plainMatch: number | null = null;
+  /** The patient's motion between the plain scan and this series, when it was undone (venography.ts register). */
+  plainMoved: Motion | null = null;
+  private plainData: ArrayLike<number> | null = null;
+  private plainUsed: Volume | null = null;
+  private venoMasks: VenoMasks | null = null;
+  private venoKey = "";
+  private venoCavity: { cav: BoneRegion; plates: BoneRegion } | null = null;
+  /** Both phases of this CTA, when the study has them (set before open()). */
+  phases: { arterial: Volume; venous: Volume; native: Volume | null } | null = null;
+  private phaseBone: BoneRegion | null = null;
+  /** The arteries / veins preset was chosen for one contrast series: fit its curves once its vessels are known. */
+  private fitPending = false;
+  /** The arteries / veins preset was chosen by open() (venous series), not by the user: the next series starts afresh. */
+  private autoVeins = false;
   /** The arterial core in use, for the panel (null = no vein layer). */
+  /** One series: ml of dural sinus the tracing found (null: two phases, or no vein layer). */
+  get sinusMl(): number | null {
+    return this.renderer.vessels?.sinusMl ?? null;
+  }
+
+  /** The head's vessels were labelled by the vessel atlas. */
+  get byAtlas(): boolean {
+    return !!this.renderer.vessels?.atlas;
+  }
+
   get arteryCore(): number | null {
     return this.renderer.vessels?.coreHu ?? null;
   }
@@ -244,6 +346,10 @@ export class VRView {
   private dragBtn = 0;
   private lastTap = { t: 0, x: 0, y: 0 };
   onChange: () => void = () => undefined;
+  /** Heavy work the view starts by itself (the bone area arrived): the page shows a wait panel around it. */
+  onWork: (text: string, fn: () => void) => void = (_, fn) => fn();
+  /** The curves were changed here (bone curves for a bone area from the plain scan): the editor shows them again. */
+  onTF: () => void = () => undefined;
   lastFrameMs = 0;
 
   constructor(readonly canvas: HTMLCanvasElement) {
@@ -281,19 +387,45 @@ export class VRView {
     this.lo = this.ct ? Math.max(lo, CT_FLOOR) : lo;
     this.hi = Math.max(hi, this.lo + 1);
     this.window = vol.ww && vol.wl !== null ? [vol.wl - vol.ww / 2, vol.wl + vol.ww / 2] : [this.lo, this.hi];
-    if (!this.tf || this.tfCt !== this.ct) {        // CT: the vessels + bone preset; MR / other: one curve
+    if (!this.tf || this.tfCt !== this.ct || this.autoVeins) {   // CT: the vessels + bone preset; MR / other: one curve
       this.tf = copyTF(this.ct ? builtinPresets()[1] : genericPreset(this.lo, this.hi));
       this.tfCt = this.ct;
+    }
+    // The preset 3D opens on, only from the CT default (dcv/main_window.py _default_vein_preset): the venous series of a
+    // CTA with its arterial series: arteries / veins; one venous or delayed series with contrast in the head, or a
+    // newborn's head (thinSkull): the venography (on a newborn the default coloured the whole skull as vessels: its
+    // plates are 150-450 HU); anything else (an arterial CTA, a routine '+ CM' head CT) stays on vessels + bone.
+    this.fitPending = this.autoVeins = false;
+    if (this.ct && this.tf.name === builtinPresets()[1].name) {
+      const own = phaseOfName(vol.description);
+      if (this.phases) {
+        if (vol === this.phases.venous) {
+          this.tf = copyTF(builtinPresets().find(usesVeins)!);
+          this.autoVeins = true;
+        }
+      } else if (own !== "arterial" && ((own === "venous" && (intracranialTop(vol) ?? 70) >= 70) || thinSkull(vol))) {
+        this.tf = copyTF(builtinPresets().find(isVenography)!);
+        this.autoVeins = true;
+      }
     }
     this.hist = histogram(vol, this.lo, this.hi);
     this.box ??= contentBox(vol, this.ct);
     const f = this.factor();
     if (this.resolution !== f) this.removed = null;
     this.resolution = f;
-    this.bone = null;
-    this.boneKey = "";
+    const p = this.prepared?.vol === vol && this.prepared.key === `${this.boneHu}` ? this.prepared : null;
+    this.prepared = null;
+    this.bone = p?.bone ?? null;
+    this.boneKey = p?.key ?? "";
+    this.boneSource = p?.source ?? null;
+    // all of a bone area from the plain scan is bone: its curves lower, so a child's thin bone shows (boneCurveFrom)
+    if (p && boneCurveFrom(p.source) !== null && unchangedBuiltin(this.tf)) this.tf = fitBoneCurves(this.tf, boneCurveFrom(p.source)!);
+    if (p && p.source !== "cta") this.onStatus(boneNote(p.source));
     this.vessels = null;
     this.vesselKey = "";
+    this.venoMasks = null;
+    this.venoKey = "";
+    this.venoCavity = null;
     this.undoStack = [];
     this.crop = { on: false, lo: [0, 0, 0], hi: [1, 1, 1] };
     this.cropEdit = false;
@@ -310,14 +442,23 @@ export class VRView {
   /** (Re)upload with the bone lock state; falls back to half resolution when the GPU refuses the full volume. */
   upload(): void {
     const vol = this.vol!;
-    this.boneOn = this.ct && this.boneLock;
+    const wantBone = this.ct && this.boneLock;
     const key = `${this.boneHu}`;
-    if (this.boneOn && (!this.bone || this.boneKey !== key)) {
-      this.bone = boneRegion(vol, this.boneHu, 3, 1.5, gridStep(vol.rows * vol.cols * vol.n, MOBILE));
-      this.boneKey = key;
+    // with both phases the classification makes the bone area too, far quicker than the shape analysis of one series
+    const pair = this.phases !== null && usesVeins(this.tf) && !isVenography(this.tf) && !this.plain;
+    if (wantBone && !pair && (!this.bone || this.boneKey !== key)) {
+      // made in the worker (3D shows at once, as with the bone lock off, and takes the bone area when it comes); with
+      // the vein layer the vessels need it first, so it is made here
+      if (usesVeins(this.tf) || !this.boneLater(vol, key)) {
+        const plain = this.bonePlainData(vol), source = this.sourceOf(vol, plain), f = gridStep(vol.rows * vol.cols * vol.n, MOBILE);
+        this.bone = this.boneHere(vol, f, source, plain, this.boneHu);
+        this.boneSource = madeFrom(source, this.bone.plainPlanes, this.ruleOf(vol));
+        this.boneKey = key;
+      }
     }
-    const bone = this.boneOn ? this.bone : null;
+    this.boneOn = wantBone && (pair || (this.bone !== null && this.boneKey === key));
     this.syncVessels();
+    const bone = this.boneOn ? this.bone : null;
     const before = this.resolution;
     this.box ??= contentBox(vol, this.ct);
     let ok = this.renderer.upload(vol, this.resolution, bone, this.ct, this.removed, this.box);
@@ -332,23 +473,253 @@ export class VRView {
     this.applyTF(false);
   }
 
+  /** The bone area is being made in the worker (the bone lock acts once it is there). */
+  get bonePending(): boolean {
+    return this.boneJob !== null;
+  }
+
+  private boneJob: { id: number; vol: Volume; key: string } | null = null;
+
+  /**
+   * What the bone area of `vol` is made from (dcv/segment.py bone_source; with both phases phases.ts makes it): the
+   * plain scan when it lines up here (`plain`), a CTA's bone less its bright vessels (a series named arterial or venous,
+   * or a CTA's contrast in the head), else all from the threshold (a routine '+ CM' head CT: there the CTA rule took a
+   * child's facial bones and spine, which have no cortical core, for vessels).
+   */
+  private sourceOf(vol: Volume, plain: ArrayLike<number> | null): BoneSource {
+    return plain || (this.plainGridsOf === vol && this.plainGrids.size) ? "plain" : this.ruleOf(vol);
+  }
+
+  /** Let go of the plain scan itself (a phone's memory: the page then frees it); its copies on the bone grid stay. */
+  releasePlain(): void {
+    this.plain = this.plainUsed = this.plainData = null;
+    if (this.bonePlain) this.bonePlain.data = null;
+  }
+
+  /** sourceOf without the plain scan (also where it does not line up). */
+  private ruleOf(vol: Volume): BoneSource {
+    if (this.ctaOf?.vol !== vol) {
+      const own = phaseOfName(vol.description), thin = thinSkull(vol);
+      this.ctaOf = { vol, thin, cta: !thin && (own === "arterial" || own === "venous" || (intracranialTop(vol) ?? 0) >= CTA_TOP_HU) };
+    }
+    return this.ctaOf.thin ? "thin" : this.ctaOf.cta ? "cta" : "ct";
+  }
+
+  /** The plain scan on vol's grid, also when it does not line up as a whole: the bone worker then lines it up slab by
+   *  slab (bone.ts slabPlain; no registration: that takes seconds on a phone); null when there is none. Once per plain scan. */
+  private bonePlainData(vol: Volume): ArrayLike<number> | null {
+    const p = this.plain;
+    if (!p || vol.modality !== "CT") return null;
+    if (this.bonePlain?.of !== p) {
+      this.plainGrids.clear();
+      this.plainGridsOf = vol;
+      const r = plainOnVol(p, vol);
+      if (this.plainUsed !== p) this.plainMatch = r.match;
+      this.bonePlain = { of: p, data: r.data, whole: r.match !== null && r.match >= MATCH_MIN };
+    }
+    return this.bonePlain.data;
+  }
+
+  /** The bone area of vol on this thread (no worker, or it failed). */
+  private boneHere(vol: Volume, f: 1 | 2, source: BoneSource, plain: ArrayLike<number> | null, hu: number): BoneRegion {
+    const rule = this.ruleOf(vol), plates = source === "thin" || rule === "thin" ? platesFor(vol, f) : null;
+    return boneRegion(vol, hu, 3, 1.5, f, source, plain, plates, rule, this.bonePlain?.whole ?? true);
+  }
+
+  /**
+   * Make the bone area of `vol` before 3D opens, in the worker (the page's wait panel turns meanwhile), so 3D opens with
+   * the bone lock on in one step, as in 1.0.4: drawn first and coloured again a moment later, the second pass held the
+   * screen behind a wait panel once more. Not when the two phases make it (the venous series of a CTA with its arterial
+   * one opens on arteries / veins).
+   */
+  async prepareBone(vol: Volume): Promise<void> {
+    this.prepared = null;
+    if (vol.modality !== "CT" || !this.boneLock || (this.phases && vol === this.phases.venous && !this.plain)) return;
+    const key = `${this.boneHu}`, hu = this.boneHu, f = gridStep(vol.rows * vol.cols * vol.n, MOBILE);
+    const plain = this.bonePlainData(vol), source = this.sourceOf(vol, plain);
+    const r = await this.boneInWorker(vol, f, source, plain, hu);
+    const bone: BoneRegion = r ? { bits: r.bits, enhanced: r.enhanced, plainPlanes: r.plainPlanes, nx: Math.ceil(vol.cols / f),
+      ny: Math.ceil(vol.rows / f), nz: vol.n, f } : this.boneHere(vol, f, source, plain, hu);
+    this.prepared = { vol, key, bone, source: madeFrom(source, bone.plainPlanes, this.ruleOf(vol)) };
+  }
+
+  /** The bone area of vol made in the worker; null without a worker, or when it failed. */
+  private boneInWorker(vol: Volume, f: 1 | 2, source: BoneSource, plain: ArrayLike<number> | null, hu: number): Promise<WorkerBone | null> {
+    const w = boneWorker();
+    if (!w) return Promise.resolve(null);
+    const g = boneGrid(vol, f, null);
+    if (source === "plain") {
+      // the plain scan on this grid, once: the scan itself may be let go after (releasePlain)
+      let pg = this.plainGridsOf === vol ? this.plainGrids.get(f) : undefined;
+      if (!pg && plain) {
+        pg = plainGridOf(vol, f, plain);
+        this.plainGrids.set(f, pg);
+      }
+      if (pg) g.plain = pg.slice();
+    }
+    const id = ++boneJobs;
+    // a newborn's skull: the volume pooled here (a fraction of a second), its plates found in the worker
+    let pooled = null;
+    if (source === "thin") {
+      const c = cavityGrid(vol), p = pool(vol.data, vol.cols, vol.rows, vol.n, c.f, c.fz);
+      pooled = { mean: p.mean, top: p.top, d: p.d, f: c.f, fz: c.fz, sp: c.sp };
+    }
+    return new Promise((done) => {
+      boneWaiting.set(id, done);
+      const transfer: Transferable[] = [g.values.buffer];
+      if (g.plain) transfer.push(g.plain.buffer);
+      if (pooled) transfer.push(pooled.mean.buffer, pooled.top.buffer);
+      w.postMessage({ id, values: g.values, plain: g.plain, dims: g.dims, spacing: g.spacing, hu, source, f, pooled,
+        rule: this.ruleOf(vol), whole: this.bonePlain?.whole ?? true }, transfer);
+    });
+  }
+
+  /** Start the bone area of `vol` for the bone lock at `key` in the worker (the lock turned on, its threshold moved);
+   *  false when there is no worker. */
+  private boneLater(vol: Volume, key: string): boolean {
+    if (this.boneJob?.vol === vol && this.boneJob.key === key) return true;      // already under way
+    if (!boneWorker()) return false;
+    const f = gridStep(vol.rows * vol.cols * vol.n, MOBILE);
+    const id = ++boneJobs;
+    this.boneJob = { id, vol, key };
+    this.bone = null;
+    this.boneKey = "";
+    const hu = this.boneHu;
+    const plain = this.bonePlainData(vol), source = this.sourceOf(vol, plain);
+    const dims: [number, number, number] = [Math.ceil(vol.cols / f), Math.ceil(vol.rows / f), vol.n];
+    void this.boneInWorker(vol, f, source, plain, hu).then((r) => this.boneDone(id, vol, key, hu, f, dims, source, plain, r));
+    return true;
+  }
+
+  /** The worker's bone area (r; null: it failed, made here once) is in: the volume is written again with it. */
+  private boneDone(id: number, vol: Volume, key: string, hu: number, f: 1 | 2, dims: [number, number, number], source: BoneSource,
+    plain: ArrayLike<number> | null, r: WorkerBone | null): void {
+    {
+      if (this.boneJob?.id !== id) return;                // another volume or threshold since
+      this.boneJob = null;
+      if (this.vol !== vol) return;                       // 3D closed
+      this.bone = r ? { bits: r.bits, enhanced: r.enhanced, plainPlanes: r.plainPlanes, nx: dims[0], ny: dims[1], nz: dims[2], f }
+        : this.boneHere(vol, f, source, plain, hu);
+      source = madeFrom(source, this.bone.plainPlanes, this.ruleOf(vol));
+      this.boneSource = source;
+      this.boneKey = key;
+      // the volume is written again (a second or more on a phone): with the wait panel, not a silent freeze
+      this.onWork("Bone lock: applying the bone area…", () => {
+        if (this.vol !== vol) return;
+        if (boneCurveFrom(source) !== null && unchangedBuiltin(this.tf)) {
+          // all of the area is bone: its curves lower, so a child's thin bone shows
+          this.tf = fitBoneCurves(this.tf, boneCurveFrom(source)!);
+          this.onTF();
+        }
+        if (this.ct && this.boneLock && this.boneHu === hu && !usesVeins(this.tf)) {
+          // the texture is there: only its values again, now with the bone area
+          this.boneOn = true;
+          this.syncVessels();
+          this.renderer.fill(vol, this.bone, this.ct, this.removed, 0, this.renderer.dims[2]);
+          this.applyTF(false);
+        } else {
+          this.upload();
+        }
+        this.onChange();
+        this.onStatus(boneNote(source));
+      });
+    }
+  }
+
   get gpuBytes(): number {
     return this.renderer.gpuBytes;
   }
 
-  /** Bring the artery / vein masks in line with the curves. True when what the texture should hold changed. */
+  /** The arteries of both phases (phases.ts classifyPhases, shared with the arteries / veins preset), a cell wider. */
+  private phaseArteriesWide(): BoneRegion {
+    const key = `phases|${this.boneHu}`;
+    if (!this.vessels || this.vesselKey !== key) {
+      const r = classifyPhases(this.phases!.arterial, this.phases!.venous, this.phases!.native, this.boneHu, this.vol === this.phases!.venous);
+      this.vessels = r;
+      this.vesselKey = key;
+      this.phaseBone = r.bone;
+    }
+    if (this.wideOf !== this.vessels) {
+      const a = this.vessels.arteries, n = a.nx * a.ny * a.nz;
+      this.wide = { ...a, bits: pack(dilateMask(unpack(a.bits, n), [a.nx, a.ny, a.nz], [1, 1, 1])) };
+      this.wideOf = this.vessels;
+    }
+    return this.wide!;
+  }
+
+  private wide: BoneRegion | null = null;
+  private wideOf: VesselMasks | null = null;
+
+  /** Bring the artery / vein masks (or the venography's) in line with the curves. True when what the texture should hold
+   *  changed. */
   private syncVessels(): boolean {
     const vol = this.vol!;
     const want = this.ct && usesVeins(this.tf);
-    const before = this.renderer.vessels;
+    const veno = want && isVenography(this.tf);
+    const before = this.renderer.vessels, beforeVeno = this.renderer.veno;
+    if (!veno) this.renderer.veno = null;
     if (!want) {
       this.renderer.vessels = null;
-      return before !== null;
+      // both phases and no vein layer: bone that moved between the phases (breathing, the jaw) is no artery, so it stays
+      // bone (dcv/segment.py; a CTA's face and orbits came out red)
+      const beforeHard = this.renderer.hard;
+      this.renderer.hard = this.phases && this.boneOn && this.ct ? { arteries: this.phaseArteriesWide(), hu: this.boneHu } : null;
+      return before !== null || beforeVeno !== null || beforeHard !== this.renderer.hard;
+    }
+    if (veno) {
+      this.renderer.vessels = null;
+      const key = `${this.boneOn ? this.boneKey : "off"}|${this.resolution}|${this.plain ? "plain" : "-"}`;
+      if (!this.venoMasks || this.venoKey !== key) {
+        this.venoCavity ??= cavity(vol);
+        if (this.plain !== this.plainUsed) {
+          // on this grid, lined up when the patient moved between the scans (venography.ts register), once per plain scan
+          const r = this.plain ? plainFor(this.plain, vol) : { data: null, match: null, moved: null };
+          [this.plainData, this.plainMatch, this.plainMoved, this.plainUsed] = [r.data, r.match, r.moved, this.plain];
+        }
+        // veins only: the arteries of this series (both phases on a CTA; one series: the atlas and phases.ts
+        // vesselTrees). Without the atlas 'arteries' are every vessel but the traced sinuses, and hiding them took the
+        // cortical veins too: then the venography shows all of them, as before (dcv/segment.py)
+        const one = this.phases ? null : sinusMasks(vol, phaseOfName(vol.description) === "arterial"
+          ? vesselMasks(vol, this.boneOn ? this.bone : null, this.arteryHu, gridStep(vol.rows * vol.cols * vol.n, MOBILE)) : null);
+        const arteries = this.phases
+          ? classifyPhases(this.phases.arterial, this.phases.venous, this.phases.native, this.boneHu, vol === this.phases.venous).arteries
+          : one?.atlas ? one.arteries : null;
+        this.venoMasks = venoMasks(vol, this.venoCavity.cav, this.boneOn ? this.bone : null, this.plainData, this.resolution,
+          this.plainMoved ? 2 : 1, this.venoCavity.plates, arteries);
+        this.venoKey = key;
+      }
+      this.renderer.veno = this.venoMasks;
+      return before !== null || beforeVeno !== this.venoMasks;
+    }
+    if (this.phases) {
+      const key = `phases|${this.boneHu}`;
+      if (!this.vessels || this.vesselKey !== key) {
+        const r = classifyPhases(this.phases.arterial, this.phases.venous, this.phases.native, this.boneHu, vol === this.phases.venous);
+        const notes: string[] = [];
+        if (r.shiftMm) notes.push(`The patient moved ${r.shiftMm.toFixed(1)} mm between the phases (corrected)`);
+        if (r.late) notes.push(r.atlas ? "Both series came after the arterial peak: in the head, the vessel atlas decided arteries and veins"
+          : "Both series came after the arterial peak: anatomy decided arteries and veins (cavernous sinus shows red)");
+        if (notes.length) this.onStatus(notes.join(". "));
+        this.vessels = r;
+        this.vesselKey = key;
+        this.phaseBone = r.bone;
+      }
+      if (this.boneOn && this.boneSource !== "plain") this.bone = this.phaseBone;      // the plain scan's bone comes first
+      this.renderer.vessels = this.vessels;
+      return before !== this.vessels;
     }
     const key = `${this.boneOn ? this.boneKey : "off"}|${this.arteryHu}`;
     if (!this.vessels || this.vesselKey !== key) {
-      this.vessels = vesselMasks(vol, this.boneOn ? this.bone : null, this.arteryHu, gridStep(vol.rows * vol.cols * vol.n, MOBILE));
+      // one series: the dural sinuses by anatomy; a named arterial CTA keeps its brightness rule for the rest
+      const arterial = phaseOfName(vol.description) === "arterial"
+        ? vesselMasks(vol, this.boneOn ? this.bone : null, this.arteryHu, gridStep(vol.rows * vol.cols * vol.n, MOBILE)) : null;
+      this.vessels = sinusMasks(vol, arterial) ?? arterial ?? vesselMasks(vol, this.boneOn ? this.bone : null, this.arteryHu, gridStep(vol.rows * vol.cols * vol.n, MOBILE));
       this.vesselKey = key;
+    }
+    if (this.fitPending && this.vessels.fit) {
+      // the CTA curves left a routine contrast CT's sinuses (~100-140 HU) nearly clear
+      this.tf = fitVesselCurves(this.tf, this.vessels.fit.floor, this.vessels.fit.peak);
+      this.fitPending = false;
     }
     this.renderer.vessels = this.vessels;
     return before !== this.vessels;
@@ -356,7 +727,7 @@ export class VRView {
 
   /** The value axis of the stored volume, and its table: wider with the veins' domain far above the others. */
   private tableSpec(width: number) {
-    const bone = this.boneOn, vein = this.renderer.vessels !== null;
+    const bone = this.boneOn, vein = this.renderer.vessels !== null || this.renderer.veno !== null;
     const x0 = bone ? -BONE_OFFSET - this.hi : this.lo, x1 = vein ? VEIN_OFFSET + 3000 : this.hi;
     return { x0, x1, width, lo: this.lo, bone, boneOffset: BONE_OFFSET, vein, veinOffset: VEIN_OFFSET, gain: this.gain };
   }
@@ -371,7 +742,7 @@ export class VRView {
   applyTF(fast: boolean): void {
     if (!this.vol) return;
     if (this.syncVessels()) this.renderer.fill(this.vol, this.boneOn ? this.bone : null, this.ct, this.removed, 0, this.renderer.dims[2]);
-    const vein = this.renderer.vessels !== null;
+    const vein = this.renderer.vessels !== null || this.renderer.veno !== null;
     const limit = this.renderer.maxTexture2D;
     const width = Math.min(limit, vein ? (fast ? 2048 : 8192) : fast ? 1024 : 4096);
     const { x0, x1 } = this.tableSpec(width);
@@ -508,7 +879,7 @@ export class VRView {
     const hi: V3 = this.crop.on ? [this.crop.hi[0] * F[0], this.crop.hi[1] * F[1], this.crop.hi[2] * F[2]] : [...F];
     const p = pickSurface({
       data: vol.data, cols: vol.cols, rows: vol.rows, dims: r.dims, start: r.start, f: r.f, spacing: r.spacing, origin: r.origin,
-      clipLo: lo, clipHi: hi, bone: this.boneOn ? this.bone : null, vessels: r.vessels, ct: this.ct, removed: this.removed,
+      clipLo: lo, clipHi: hi, bone: this.boneOn ? this.bone : null, vessels: r.vessels, veno: r.veno, hard: r.hard, ct: this.ct, removed: this.removed,
       air: this.ct ? CT_FLOOR : vol.valueRange()[0], blend: this.blend, alpha: T.alpha, alphaW: T.w, alphaH: T.h, x0: T.x0, x1: T.x1,
       gradMax: RIM_GRAD_MAX, solid: this.segMasks.length ? (px, py, pz) => this.onSegment(px, py, pz) : undefined,
     }, ro, rd);
@@ -679,8 +1050,13 @@ export class VRView {
     return new Promise((res) => out.toBlob(res, "image/png"));
   }
 
-  setPreset(tf: TransferFunction): void {
-    this.tf = copyTF(tf);
+  /** `builtin`: a built-in arteries / veins preset on one contrast series has its curves fitted to the scan. */
+  setPreset(tf: TransferFunction, builtin = false): void {
+    const from = this.boneSource ? boneCurveFrom(this.boneSource) : null;
+    this.tf = builtin && this.boneLock && from !== null ? fitBoneCurves(tf, from) : copyTF(tf);
+    this.autoVeins = false;
+    this.fitPending = builtin && this.ct && this.phases === null && usesVeins(tf) && !isVenography(tf)
+      && phaseOfName(this.vol?.description ?? "") !== "arterial";
     this.applyTF(false);
     this.onChange();
   }
@@ -1016,8 +1392,13 @@ export class VRView {
     this.renderer.release();
     this.renderer.releaseSegments();
     this.renderer.vessels = null;
+    this.renderer.veno = null;
     this.vessels = null;
     this.vesselKey = "";
+    this.venoMasks = null;
+    this.venoCavity = null;
+    this.plain = this.plainUsed = this.plainData = this.plainMoved = this.bonePlain = this.ctaOf = this.prepared = null;
+    this.boneSource = null;
     this.segMasks = [];
     this.vol = null;
     this.box = null;
@@ -1025,6 +1406,7 @@ export class VRView {
     this.removed = null;
     this.undoStack = [];
     this.bone = null;
+    this.boneJob = null;                                   // a bone area still being made is not wanted any more
     this.pickTable = null;
     this.measures = [];
     this.selectedMeasure = null;

@@ -65,7 +65,7 @@ def synthetic_cta():
     d[vein] = 150
     plate = (np.abs(x - 62) < 1) & (y >= 12) & (y <= 18) & (np.abs(z - 50) < 6)
     d[plate & (r < 48) & (r >= 42)] = 600
-    return Volume(data=d, spacing=(1.0, 1.0, 1.0), origin=(0, 0, 0), modality="CT", description="synthetic CTA",
+    return Volume(data=d, spacing=(1.0, 1.0, 1.0), origin=(0, 0, 0), modality="CT", description="synthetic CTA ARTER",
                   patient="X", uid="synthetic", frame_uid="f"), sphere, artery, vein
 
 
@@ -131,7 +131,10 @@ try:
     av = next(p for p in tf_model.builtin_presets() if "Veins" in p.name)
     vw.set_tf(av)
     vw.apply_tf()
-    check(sv.state.encode_veins and vw.artery_spin.isVisibleTo(vw), "Arteries / Veins preset turns on the vein layer")
+    check(sv.state.encode_veins and vw.phase_note.isVisibleTo(vw) and "series" in vw.phase_note.text(),
+          "Arteries / Veins preset turns on the vein layer and says how veins were found")
+    check(vw.artery_spin.isVisibleTo(vw) == (sv.state.phase == "arterial"),
+          "the arterial threshold shows only for a named arterial series")
     plain = next(p for p in tf_model.builtin_presets() if p.name == "CT Angio - Vessels + Bone")
     vw.set_tf(plain)
     vw.apply_tf()
@@ -162,7 +165,7 @@ try:
     QTest.mouseMove(ed, QPoint(x1 + 24, yc))
     QTest.mouseRelease(ed, Qt.LeftButton, Qt.NoModifier, QPoint(x1 + 24, yc))
     check(ed.hi > v0 + 15, f"dragging the handle widens the range to {ed.hi:.0f}")
-    ok = wait_for(lambda: vw._range_job is None and vw._range_want is None and sv.state.active_segment is not seg, 60)
+    ok = wait_for(lambda: vw.grower._job is None and vw.grower._want is None and sv.state.active_segment is not seg, 60)
     new = sv.state.active_segment
     check(ok and new.seed == seg.seed and new.range[1] > v0 + 15, f"segment re-grown, {ml0:.2f} -> {new.volume_ml:.2f} ml")
     check(new.volume_ml >= ml0, "a wider range keeps at least the same volume")
@@ -173,7 +176,7 @@ try:
     QTest.mouseMove(ed, QPoint(ed.width() - 2, yc))
     QTest.mouseRelease(ed, Qt.LeftButton, Qt.NoModifier, QPoint(ed.width() - 2, yc))
     check(ed.lo <= ed.value, "the clicked value stays inside the range")
-    wait_for(lambda: vw._range_job is None and vw._range_want is None, 60)
+    wait_for(lambda: vw.grower._job is None and vw.grower._want is None, 60)
     vw.close()
 
     # collage in another plane

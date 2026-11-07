@@ -11,8 +11,11 @@ import { openCollage } from "./view/collage";
 import { KINDS, MPRModel, mprHooks, PlaneSource, SLABS, TITLES } from "./view/mpr";
 import { Linker } from "./view/linked";
 import { CurveEditor } from "./vr/editor";
-import { builtinPresets, copyTF, fromDict, usesVeins, type TransferFunction } from "./vr/tf";
+import { builtinPresets, copyTF, fromDict, isVenography, usesVeins, type TransferFunction } from "./vr/tf";
+import { contrastName, MATCH_MIN as VENO_MATCH_MIN, thinSkull } from "./vr/venography";
 import { boneAndVessels, forceGridStep } from "./vr/bone";
+import { loadVesselAtlas } from "./vr/atlas";
+import { isPhasePair, phaseOfName } from "./vr/phases";
 import { MAX_SEGMENTS_3D, type SegmentMask } from "./vr/renderer";
 import { QUALITY, VIEWS, VRView, type Resolution } from "./vr/view3d";
 import { Viewport, type Tool } from "./view/viewport";
@@ -27,6 +30,9 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 // iOS kills a tab that holds much more than ~1–1.5 GB; keep decoded series well below that (3D adds a GPU copy)
 const BUDGET = IOS ? 450e6 : 2000e6;
+/** A phone's peak for a study's plain scan beside the series in 3D, read for its bone area and let go after (VRView
+ *  releasePlain): a CTA's PRE and arterial series, 2 × 298 MB, did not fit BUDGET and the bone took the aneurysm's ICA. */
+const PLAIN_PEAK = IOS ? 700e6 : BUDGET;
 
 /** The 2D viewports of the layout (1×1 uses the first); `cellSeries` = the series each one shows. */
 const views2d = [...document.querySelectorAll<HTMLCanvasElement>("#grid canvas")].map((c) => new Viewport(c));
@@ -95,9 +101,9 @@ for (const [tool, icon, label, title] of TOOLS) {
   });
 }
 const MEASURES: [Tool, string, string][] = [
-  ["length", "Length", "L"], ["ellipse", "Ellipse (ROI): area, mean, SD, min, max", "E"], ["angle", "Angle", "Shift+A"], ["cobb", "Cobb angle", "Shift+C"],
+  ["length", "Length", "L"], ["polyline", "Open polygon: tap point by point, double tap or Enter ends it", "Shift+O"], ["ellipse", "Ellipse (ROI): area, mean, SD, min, max", "E"], ["angle", "Angle", "Shift+A"], ["cobb", "Cobb angle", "Shift+C"],
 ];
-button("length", "Measure", "Length, ellipse ROI, angle, Cobb angle. Drag a point to move it, the line to move all of it", (b) => {
+button("length", "Measure", "Length, open polygon, ellipse ROI, angle, Cobb angle. Drag a point to move it, the line to move all of it, the caption to put it elsewhere", (b) => {
   showMenu(b, MEASURES.map(([tool, label, key]): MenuItem => [`${vp.tool === tool ? "✓ " : ""}${label}`, () => setTool(tool), key]));
 }, (b) => {
   b.disabled = mode === "3d" || !vp.vol;
@@ -262,14 +268,26 @@ async function placeSeed(view: Viewport, voxel: [number, number, number]) {
     hideProgress();
     if (currentVolume() !== v) return;
   }
+  // growing runs on this thread: put the busy bar on screen first, so a large region never looks like a hang
+  progress(0, 0, "Segmenting…");
+  await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   const t0 = performance.now();
-  const seg = segs.seed(v, voxel);
+  let seg: ReturnType<typeof segs.seed>;
+  try {
+    seg = segs.seed(v, voxel);
+  } catch (e) {
+    toast(`Could not segment here: ${e instanceof RangeError ? "not enough memory on this device" : String(e)}`, 6000);
+    return;
+  } finally {
+    hideProgress();
+  }
+  if (currentVolume() !== v) return;
   if (!seg) {
     toast("Nothing grows from this point");
     return;
   }
   toast(`${seg.name}: ${fmtMl(seg.ml)} (${Math.round(performance.now() - t0)} ms). Drag the handles to change what enters it`);
-  segPanel.open(v, seg);
+  segPanel.open(v, seg, performance.now() - t0);
 }
 
 function setTool(t: Tool) {
@@ -644,6 +662,8 @@ function refresh() {
   $("dsapad").hidden = !(vp.dsa && vp.tool === "dsaShift");
 }
 const segs = new Segments();
+// phones and tablets: a thin-pixel series grows on the halved grid, as the 3D bone area does (a quarter of the work)
+segs.halfGrid = IOS || matchMedia("(pointer: coarse)").matches;
 const segPanel = new SegmentPanel(segs);
 
 function masksOf(list: Segment[]): SegmentMask[] {
@@ -867,6 +887,8 @@ function vr(): VRView {
     v.ranOut = ranOut;
     v.onChange = () => syncPanel();
     v.onStatus = (t) => toast(t);
+    v.onWork = (t, fn) => busy(t, fn);
+    v.onTF = () => editor?.setTF(v.tf);
     v.onLost = () => {
       ranOut = true;
       const canvas = $("vr-canvas");
@@ -990,8 +1012,8 @@ function syncPanel() {
   $("vr-rim-v").textContent = `${Math.round(v.tf.edge_threshold)} HU`;
   $("vr-bone-l").hidden = !v.ct;
   $<HTMLInputElement>("vr-bone").checked = v.boneLock;
-  $("vr-bone-v").textContent = v.boneLock ? `≥ ${v.boneHu} HU` : "";
-  $("vr-art-l").hidden = v.arteryCore === null;
+  $("vr-bone-v").textContent = v.boneLock ? `≥ ${v.boneHu} HU${v.bonePending ? " · making…" : ""}` : "";
+  $("vr-art-l").hidden = v.arteryCore === null || v.phases !== null || phaseOfName(v.vol.description) !== "arterial";
   const art = $<HTMLInputElement>("vr-art");
   if (document.activeElement !== art) {
     art.value = v.arteryHu === null ? "" : String(v.arteryHu);
@@ -1021,6 +1043,84 @@ function syncPanel() {
   editor.draw();
 }
 
+/** The other phase of a CTA (and its pre-contrast series when memory allows), on exactly the same grid; null without. */
+async function phasesOf(v: Volume): Promise<VRView["phases"]> {
+  const own = phaseOfName(v.description);
+  // not on a phone: the two series and their classification (grids of hundreds of MB) closed the page (real CTA,
+  // 2 × 298 MB)
+  if (v.modality !== "CT" || IOS || (own !== "arterial" && own !== "venous")) return null;
+  const study = firstHeader(v.series).studyUid;
+  const named = (p: string) => state.series.find((s) => s !== v.series && firstHeader(s).studyUid === study
+    && seriesCount(s) === v.n && phaseOfName(s.description) === p);
+  const whole = async (s: Series | undefined): Promise<Volume | null> => {
+    if (!s) return null;
+    // 2 bytes a voxel for integer rescaling, as Volume stores it (plainOf)
+    const h = firstHeader(s), need = seriesCount(s) * v.rows * v.cols * (Number.isInteger(h.slope) && Number.isInteger(h.intercept) ? 2 : 4);
+    if (!state.volumes.get(s) && totalBytes() + need > BUDGET) return null;
+    const r = await load(s);
+    const o = r?.vol;
+    if (!o || o.cols !== v.cols || o.rows !== v.rows || o.n !== v.n || o.space !== v.space
+      || o.spacing.some((k, i) => Math.abs(k - v.spacing[i]) > 0.01)) return null;
+    if (!o.complete) {
+      const poll = window.setInterval(() => progress(o.readyCount, o.n, `Reading ${o.description}…`), 200);
+      progress(o.readyCount, o.n, `Reading ${o.description}…`);
+      await o.want(Array.from({ length: o.n }, (_, k) => k));
+      clearInterval(poll);
+      hideProgress();
+    }
+    return o;
+  };
+  const other = await whole(named(own === "venous" ? "arterial" : "venous"));
+  if (!other || !isPhasePair(v, other)) return null;
+  const native = await whole(named("native"));
+  return own === "venous" ? { arterial: other, venous: v, native } : { arterial: v, venous: other, native };
+}
+
+
+/** The plain (pre-contrast) scan of a contrast CT's study, for the venography preset: named so (NC, PRE, native...), or
+ *  the one series without a contrast word next to this '+ CM' one (dcv/main_window.py _plain_series). Any field of view
+ *  or tilt in the same patient coordinates: the 3D view maps it onto this grid and lines it up (venography.ts plainFor).
+ *  null when there is none or memory does not allow. */
+async function plainOf(v: Volume, budget = BUDGET): Promise<Volume | null> {
+  if (v.modality !== "CT" || phaseOfName(v.description) === "native") return null;
+  const study = firstHeader(v.series).studyUid, contrast = contrastName(v.description);
+  const same = state.series.filter((s) => s !== v.series && firstHeader(s).studyUid === study && seriesCount(s) >= 0.5 * v.n);
+  const named = same.filter((s) => phaseOfName(s.description) === "native");
+  const s = (named.length ? named : same.filter((x) => contrast && phaseOfName(x.description) === null
+    && !contrastName(x.description)))[0];
+  if (!s) return null;
+  // the series (2 bytes a voxel for integer rescaling, as Volume stores it) and its copy on this grid, when it lies on
+  // another one: estimated at 4 + 2 bytes, a phone's budget turned away a head CT's plain scan that fits (real CT: 370 of
+  // 450 MB)
+  const h = firstHeader(s);
+  const bytes = Number.isInteger(h.slope) && Number.isInteger(h.intercept) ? 2 : 4;
+  const copy = seriesCount(s) === v.n && h.rows === v.rows && h.cols === v.cols ? 0 : v.n * v.rows * v.cols * 2;
+  if (!state.volumes.get(s) && totalBytes() + seriesCount(s) * h.rows * h.cols * bytes + copy > budget) return null;
+  const o = (await load(s))?.vol;
+  if (!o || o.space !== v.space) return null;
+  if (!o.complete) {
+    const poll = window.setInterval(() => progress(o.readyCount, o.n, `Reading ${o.description}…`), 200);
+    progress(o.readyCount, o.n, `Reading ${o.description}…`);
+    await o.want(Array.from({ length: o.n }, (_, k) => k));
+    clearInterval(poll);
+    hideProgress();
+  }
+  return o;
+}
+
+/** A phone: let go of the plain scan read for the bone area (its copies on the bone grid stay in the 3D view). */
+function releasePlain(view: VRView) {
+  const p = view.plain;
+  if (!p) return;
+  view.releasePlain();
+  for (const [s, vol] of [...state.volumes]) {
+    if (vol !== p || s === state.current) continue;
+    vol.dispose();
+    state.volumes.delete(s);
+  }
+  state.used = state.used.filter((s) => state.volumes.has(s));
+}
+
 /** Every slice decoded, the bone area, then the volume on the GPU (heavy: once per opening). */
 async function open3d() {
   const v = currentVolume();
@@ -1042,10 +1142,26 @@ async function open3d() {
     toast(`3D is not available: ${(e as Error).message ?? e}`);
     return;
   }
+  view.phases = await phasesOf(v);
+  // the study's plain scan, but not a newborn's (thinSkull): the bone lock takes its bone from it (VRView boneSource),
+  // and one venous series opens on the venography (VRView.open), which uses it too
+  view.plain = null;
+  if (v.modality === "CT" && !thinSkull(v)) view.plain = await plainOf(v, PLAIN_PEAK);
+  if (currentVolume() !== v) return;
+  // the bone area before the first frame, in the worker: 3D opens with the bone lock on in one step
+  progress(0, 0, "Bone area…");
+  await view.prepareBone(v);
+  hideProgress();
+  // a phone: the plain scan was read for the bone area; its memory goes again, but not where a venous series may open on
+  // the venography, which reads it (and reads it again when chosen later)
+  if (IOS && phaseOfName(v.description) !== "venous") releasePlain(view);
+  if (currentVolume() !== v) return;
+  // the segment's search block (tens of MB) gives way to the 3D copy; a handle drag makes it again
+  segs.release();
   setMode("3d");
   if (pageWasClosed && view.resChoice === "auto") toast("3D closed the page last time: Auto uses half resolution until the next reload");
   store(OPEN_KEY, "1");
-  busy(view.ct ? "Bone area and upload to the graphics card…" : "Upload to the graphics card…", () => {
+  busy(view.ct ? "Bone area, arteries, veins and upload to the graphics card…" : "Upload to the graphics card…", () => {
     view.open(v);
     sync3dSegments(false);
     if (!editor) {
@@ -1118,13 +1234,39 @@ $("vr-preset").addEventListener("change", () => {
   const tf = list[+val.slice(1)];
   if (!tf || !editor) return;
   const apply = () => {
-    vr().setPreset(tf);
+    vr().setPreset(tf, !val.startsWith("u"));
     editor!.setTF(vr().tf);
     syncPanel();
   };
-  if (vr().ct && usesVeins(tf)) {
-    busy("Separating arteries and veins…", apply);
-    toast("Arteries and veins separate on an arterial-phase CTA. On a late phase both are equally bright, so they cannot be told apart.");
+  if (vr().ct && isVenography(tf)) {
+    void (async () => {
+      const v = vr(), vol = v.vol;
+      if (vol && !v.plain && !thinSkull(vol)) v.plain = await plainOf(vol);
+      if (vr().vol !== vol) return;
+      busy("Venography: lining up the plain scan, finding the vessels…", () => {
+        apply();
+        const m = vr().plainMatch;
+        const moved = vr().plainMoved;
+        toast("Venography: the inside of the skull has curves of its own — Brain (white) and Veins (blue). Vessels against the"
+          + " skull are told from bone " + (m !== null && m >= VENO_MATCH_MIN ? "by the plain scan of this study"
+            + (moved ? ", lined up first: the patient had moved between the scans." : ".")
+          : m !== null ? `by their distance from it: the plain scan does not line up with this one (the patient moved: ${Math.round(m * 100)} % of the bone matched).`
+          : "by their distance from it (no plain scan of this study on this grid).") + (vr().phases || vr().byAtlas
+          ? " Arteries are left out (told from the veins by both phases, or by the vessel atlas)." : " Arteries are blue too."), 9000);
+      });
+    })();
+  } else if (vr().ct && usesVeins(tf)) {
+    busy("Separating arteries and veins…", () => {
+      apply();
+      const v = vr(), ml = v.sinusMl;
+      // one series that is no venous CTA: an estimate by anatomy, which the venous series of a CTA does better
+      const venous = v.phases ? v.vol === v.phases.venous : phaseOfName(v.vol?.description ?? "") === "venous";
+      const better = venous ? "" : " MORE accurate on the venous series of a CTA (with its arterial series in the same study).";
+      toast(v.phases ? `Arteries from ${v.phases.arterial.description}, veins from ${v.phases.venous.description}`
+        : (v.byAtlas ? "One series: arteries (red) and veins (blue) in the head by the vessel atlas, matched to this skull. Small vessels against the skull may be wrong."
+        : ml ? `One series: blue = dural sinuses found by anatomy (${Math.round(ml)} ml, often only part of them); red = every other vessel`
+          : "One series: no dural sinus could be traced.") + better, better ? 9000 : 3500);
+    });
   } else busy("Applying…", apply);
 });
 $("vr-art").addEventListener("change", () => {
@@ -1235,12 +1377,12 @@ mprViews.forEach((view) => {
 });
 
 let toastTimer = 0;
-function toast(text: string) {
+function toast(text: string, ms = 3500) {
   const t = $("toast");
   t.textContent = text;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => (t.hidden = true), 3500);
+  toastTimer = window.setTimeout(() => (t.hidden = true), ms);
 }
 
 // ================================================================== keyboard
@@ -1284,6 +1426,8 @@ window.addEventListener("keydown", (e) => {
   } else if (!e.ctrlKey && !e.metaKey && !e.altKey && k.toLowerCase() === "e" && !e.shiftKey) setTool("ellipse");
   else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey && k.toLowerCase() === "a") setTool("angle");
   else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey && k.toLowerCase() === "c") setTool("cobb");
+  else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey && k.toLowerCase() === "o") setTool("polyline");
+  else if (k === "Enter" && vp.finishDraft()) e.preventDefault();
   else if (k.toLowerCase() === "i" && !e.ctrlKey && !e.metaKey) {
     vp.invert = !vp.invert;
     vp.requestRender();
@@ -1329,6 +1473,8 @@ function showAbout() {
 }
 
 refresh();
+// where arteries and veins run in the head: used once a 3D view separates them (falls back to the rules until loaded)
+void loadVesselAtlas();
 
 // ================================================================== offline (service worker, production only)
 if (import.meta.env.PROD && "serviceWorker" in navigator) {

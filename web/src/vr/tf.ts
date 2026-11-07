@@ -10,7 +10,10 @@
  * are not arteries (see bone.ts).
  */
 
+import { THIN_BONE_HU, type BoneSource } from "./bone";
+
 export type RGB = [number, number, number];
+
 export interface TFPoint {
   x: number;
   y: number;
@@ -32,6 +35,9 @@ export interface TransferFunction {
   specular_power: number;
   background: RGB;
   edge_threshold: number;     // gradient (HU) above which hide_edges curves stop colouring
+  /** The "vein" curves colour the inside of the skull (brain and its vessels) instead of separated veins
+   *  (venography.ts). */
+  venography?: boolean;
 }
 
 /** Gradient axis of the 2D table: 0..RIM_GRAD_MAX HU (dcv/volume_view.py). */
@@ -67,16 +73,20 @@ export function fromDict(d: Record<string, unknown>): TransferFunction {
     ambient: num(d.ambient, 0.15), diffuse: num(d.diffuse, 0.9), specular: num(d.specular, 0.3),
     specular_power: num(d.specular_power, 15), edge_threshold: num(d.edge_threshold, 60),
     background: (Array.isArray(d.background) ? (d.background as number[]).slice(0, 3) : [0, 0, 0]) as RGB,
+    ...(d.venography ? { venography: true } : {}),
   });
 }
 
-function curve(name: string, pts: [number, number, RGB][], hideEdges = false): TFCurve {
-  return { name, points: pts.map(([x, y, c]) => ({ x, y, color: c.map((v) => v / 255) as RGB })), layer: guessLayer(name), hide_edges: hideEdges };
+function curve(name: string, pts: [number, number, RGB][], hideEdges = false, layer?: TFCurve["layer"]): TFCurve {
+  return { name, points: pts.map(([x, y, c]) => ({ x, y, color: c.map((v) => v / 255) as RGB })), layer: layer ?? guessLayer(name),
+    hide_edges: hideEdges };
 }
 
 const IVORY: RGB = [240, 225, 190], BONE_HI: RGB = [255, 250, 235], RED: RGB = [200, 20, 20], RED_HI: RGB = [255, 70, 60];
 const VEIN: RGB = [40, 70, 200], VEIN_HI: RGB = [80, 130, 255], SKIN: RGB = [225, 160, 120], MUSCLE: RGB = [190, 70, 60];
 const FAT: RGB = [240, 210, 120];
+const BRAIN: RGB = [235, 235, 250], VENO: RGB = [30, 60, 220], VENO_HI: RGB = [70, 120, 255], SCALP: RGB = [230, 200, 70];
+const BONE_FAINT: RGB = [220, 220, 215];
 
 /** Built-in presets of the desktop app (starting points; change them and save as your own). */
 export function builtinPresets(): TransferFunction[] {
@@ -112,6 +122,17 @@ export function builtinPresets(): TransferFunction[] {
       curve("Lung", [[-950, 0, [120, 180, 255]], [-850, 0.04, [150, 200, 255]], [-600, 0.08, [200, 220, 255]], [-450, 0.0, [230, 230, 255]]]),
       curve("Bone", [[250, 0, IVORY], [500, 0.4, IVORY], [3000, 0.85, BONE_HI]]),
     ]),
+    // a contrast head CT's veins over a faint brain, skull and skin (venography.ts): the "vein" layer is the inside of the
+    // skull here, so brain and vessels have curves of their own; the scalp and the face keep the normal layer
+    makeTF("CT Venography (contrast CT)", [
+      curve("Brain", [[10, 0, BRAIN], [25, 0.004, BRAIN], [40, 0.006, BRAIN], [55, 0.0, BRAIN]], false, "vein"),
+      curve("Veins", [[60, 0, VENO], [80, 0.35, VENO], [110, 0.85, VENO_HI], [600, 0.9, VENO_HI], [700, 0.0, VENO_HI]]),
+      // from 70 HU: what is no vessel there is stored at 69 (venography.ts)
+      curve("Vessels outside the skull", [[70, 0, VENO], [90, 0.35, VENO], [120, 0.85, VENO_HI], [600, 0.9, VENO_HI], [700, 0.0, VENO_HI]], false,
+        "normal"),
+      curve("Skin", [[-600, 0, SCALP], [-400, 0.03, SCALP], [-200, 0.03, SCALP], [-120, 0.0, SCALP]]),
+      curve("Bone", [[300, 0, BONE_FAINT], [600, 0.02, BONE_FAINT], [1200, 0.035, BONE_FAINT], [3000, 0.05, BONE_FAINT]]),
+    ], { venography: true }),
   ];
 }
 
@@ -213,6 +234,56 @@ export interface TableSpec {
 }
 
 /** Whether these curves use the artery / vein separation. */
+/** A copy of an arteries / veins preset with its two vessel curves on one scan's vessels: from floor (its vessel
+ *  threshold), a fifth up halfway to peak (its sinuses' median HU), full from peak (dcv/tf_model.py fit_vessel_curves). */
+export function fitVesselCurves(tf: TransferFunction, floor: number, peak: number): TransferFunction {
+  const out = copyTF(tf), mid = 0.5 * (floor + peak);
+  for (const c of out.curves) {
+    if (c.name !== "Veins" && c.name !== "Arteries") continue;
+    const lo = c.points[0].color, hi = c.points[c.points.length - 1].color, end = c.points[c.points.length - 2].x;
+    const top = Math.max(end, peak + 20);
+    c.points = [{ x: floor, y: 0, color: lo }, { x: mid, y: 0.2, color: lo }, { x: Math.max(peak, mid + 10), y: 0.45, color: hi },
+      { x: top, y: 0.45, color: hi }, { x: top + 100, y: 0, color: hi }];
+  }
+  out.name = tf.name.replace("CT Angio", "Contrast CT") + " (fitted)";
+  return out;
+}
+
+/** Bone curves start here on a bone area from the plain scan (dcv/segment.py BONE_CURVE_FROM_HU). */
+export const BONE_CURVE_FROM_HU = 200;
+
+/** A copy of tf with the rise of each bone curve moved down to `start` HU, when it starts higher; the venography keeps
+ *  its own. For a bone area from the plain scan: all of it is bone, a child's thin bone too, which the presets' 380-450 HU
+ *  left out (real infant CT: holes in the spine and face). dcv/tf_model.py fit_bone_curves. */
+export function fitBoneCurves(tf: TransferFunction, start = BONE_CURVE_FROM_HU): TransferFunction {
+  const out = copyTF(tf);
+  if (tf.venography) return out;
+  for (const c of out.curves) {
+    if (c.layer !== "bone" || c.points.length < 3 || c.points[0].x <= start) continue;
+    const shift = start - c.points[0].x;
+    c.points[0].x = start;
+    c.points[1].x = Math.min(c.points[1].x + shift, c.points[2].x - 1);
+  }
+  return out;
+}
+
+/** Where the bone curves start for a bone area from `source` (bone.ts BoneSource): all of it is bone (the plain scan's, a
+ *  newborn's skull and its 150-450 HU plates), so they start low enough for thin bone; null: as the preset has them. */
+export function boneCurveFrom(source: BoneSource): number | null {
+  return source === "plain" ? BONE_CURVE_FROM_HU : source === "thin" ? THIN_BONE_HU : null;
+}
+
+/** tf is one of the built-in presets as it comes. */
+export function unchangedBuiltin(tf: TransferFunction): boolean {
+  const s = JSON.stringify(tf);
+  return builtinPresets().some((p) => JSON.stringify(p) === s);
+}
+
+/** The venography preset (venography.ts). */
+export function isVenography(tf: TransferFunction): boolean {
+  return !!tf.venography && usesVeins(tf);
+}
+
 export function usesVeins(tf: TransferFunction): boolean {
   return tf.curves.some((c) => c.layer === "vein" && c.points.length >= 2);
 }

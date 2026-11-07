@@ -12,7 +12,7 @@ describe("3D quality choice", () => {
 
   it("Auto is full while the volume fits the device", () => {
     expect(resolutionFactor("auto", 157e6, limit, false)).toBe(1);       // CT 300 x 512^2
-    expect(resolutionFactor("auto", 314e6, limit, false)).toBe(1);       // CTA 600 x 512^2 on an iPhone
+    expect(resolutionFactor("auto", 314e6, limit, false)).toBe(1);       // CTA 600 x 512^2 under a 350 MB limit
     expect(resolutionFactor("auto", 500e6, limit, false)).toBe(2);
   });
 

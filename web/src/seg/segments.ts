@@ -4,7 +4,7 @@
  */
 import type { Volume } from "../dicom/volume";
 import type { Series } from "../dicom/scan";
-import { RegionGrower, volumeMl, type Grown } from "./segment";
+import { HALF_GRID_BELOW_MM, HalfGrower, RegionGrower, volumeMl, type Grower, type Grown } from "./segment";
 
 export const SEG_COLORS: [number, number, number][] = [[255, 90, 70], [70, 190, 255], [120, 220, 90], [255, 200, 60], [200, 120, 255], [255, 130, 190]];
 
@@ -28,9 +28,17 @@ let nextId = 1;
 
 export class Segments {
   private bySeries = new WeakMap<Series, Segment[]>();
-  private grower: { seg: Segment; g: RegionGrower } | null = null;
+  private grower: { seg: Segment; g: Grower } | null = null;
   /** Bumped by every change; the painted layers follow it. */
   version = 0;
+  /** Phones and tablets: thin-pixel series grow on the grid halved in-plane (HalfGrower). */
+  halfGrid = false;
+
+  private newGrower(vol: Volume, seed: [number, number, number]): Grower {
+    const [sz, sy, sx] = vol.spacing;
+    const half = this.halfGrid && Math.max(sy, sx) < HALF_GRID_BELOW_MM;
+    return new (half ? HalfGrower : RegionGrower)(vol.data, vol.cols, vol.rows, vol.n, [sz, sy, sx], seed);
+  }
   onChanged: () => void = () => undefined;
 
   list(vol: Volume | null): Segment[] {
@@ -43,19 +51,21 @@ export class Segments {
     return l;
   }
 
-  private growerFor(vol: Volume, seg: Segment): RegionGrower {
-    if (this.grower?.seg === seg && this.grower.g.data === vol.data) return this.grower.g;
-    const [sz, sy, sx] = vol.spacing;
-    const g = new RegionGrower(vol.data, vol.cols, vol.rows, vol.n, [sz, sy, sx], seg.seed);
+  private growerFor(vol: Volume, seg: Segment): Grower {
+    if (this.grower?.seg === seg && this.growerData === vol.data) return this.grower.g;
+    const g = this.newGrower(vol, seg.seed);
     this.grower = { seg, g };
+    this.growerData = vol.data;
     return g;
   }
+
+  private growerData: ArrayLike<number> | null = null;
 
   /** A new segment from a seed (z, y, x), range from the voxels around it. Null when nothing grows there. */
   seed(vol: Volume, seed: [number, number, number]): Segment | null {
     const [sz, sy, sx] = vol.spacing;
-    const g = new RegionGrower(vol.data, vol.cols, vol.rows, vol.n, [sz, sy, sx], seed);
-    const r = g.autoGrow();
+    const g = this.newGrower(vol, seed);
+    const r = g.autoGrow(2.5, undefined, vol.modality === "CT");
     if (!r.grown) return null;
     const list = this.list(vol);
     const n = list.length;
@@ -65,6 +75,7 @@ export class Segments {
     };
     list.push(seg);
     this.grower = { seg, g };
+    this.growerData = vol.data;
     this.touch();
     return seg;
   }
@@ -87,6 +98,12 @@ export class Segments {
     this.touch();
   }
 
+  setColor(seg: Segment, color: [number, number, number]): void {
+    seg.color = color;
+    seg.rev++;
+    this.touch();
+  }
+
   setVisible(seg: Segment, on: boolean): void {
     seg.visible = on;
     this.touch();
@@ -95,6 +112,7 @@ export class Segments {
   /** Editing finished: the search block (up to tens of MB) is not needed any more. */
   release(): void {
     this.grower = null;
+    this.growerData = null;
   }
 
   private touch(): void {

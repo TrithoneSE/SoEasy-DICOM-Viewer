@@ -8,7 +8,9 @@
  * second full copy in memory); it can be halved in-plane (¼ of the memory) for large volumes.
  */
 import type { Volume } from "../dicom/volume";
-import { BONE_OFFSET, CT_FLOOR, encodeVessel, VEIN_OFFSET, type BoneRegion, type VesselMasks } from "./bone";
+import { ARTERY, BONE_OFFSET, byVoxel, CT_FLOOR, encodeWith, IN_AREA, KEEP, notVesselHu, VEIN, VEIN_MIN_HU, VEIN_OFFSET, voxelRule, type BoneRegion,
+  type VesselMasks } from "./bone";
+import { encodeVeno, type VenoMasks } from "./venography";
 
 const VS = `#version 300 es
 out vec2 vNdc;
@@ -289,6 +291,11 @@ export class VolumeRenderer {
   gpuBytes = 0;
   /** Arteries / veins for the next fill (null = no vein layer). */
   vessels: VesselMasks | null = null;
+  /** The venography preset's masks (venography.ts): they decide every voxel instead of the bone area and vessels. */
+  veno: VenoMasks | null = null;
+  /** Both phases of a CTA and no vein layer: their arteries a cell wider, and the bone lock's HU. Outside the bone area
+   *  what reaches it and is no artery is bone (it moved between the phases; dcv/segment.py update_render_data). */
+  hard: { arteries: BoneRegion; hu: number } | null = null;
   private segs: SegSlot[] = [];
   private segDummy: WebGLTexture | null = null;
   private tfRange: [number, number] = [0, 1];
@@ -385,6 +392,11 @@ export class VolumeRenderer {
     const chunk = Math.max(1, Math.floor(1e6 / (nx * ny)));       // ~4 MB of Float32 staging at a time
     const buf = new Float32Array(nx * ny * Math.min(chunk, z1 - z0));
     const d = vol.data;
+    const m = this.vessels, edge = m?.edge, slice = vol.cols * vol.rows, veno = ct ? this.veno : null;
+    const paired = bone !== null && m !== null && m.artData !== undefined && m.venData !== undefined;
+    // bone from the plain scan: what did not get brighter with contrast is no vessel either (dcv/segment.py)
+    const quiet = bone?.enhanced ?? null, hide = notVesselHu(m);
+    const hard = bone && !m ? this.hard : null, ha = hard?.arteries;
     for (let c0 = z0; c0 < z1; c0 += chunk) {
       const c1 = Math.min(z1, c0 + chunk);
       let o = 0;
@@ -395,6 +407,20 @@ export class VolumeRenderer {
           const by = bone ? (Z * bone.ny + Math.floor(Y / bone.f)) * bone.nx : 0;
           const vr = this.vessels ? (Z * this.vessels.arteries.ny + Math.floor(Y / this.vessels.arteries.f)) * this.vessels.arteries.nx : 0;
           const ri = (z * ny + y) * nx;
+          if (veno) {
+            const vb = (Z * veno.ny + Math.floor(Y / veno.f)) * veno.nx;
+            for (let x = 0; x < nx; x++) {
+              const i = ri + x;
+              if (removed && removed[i >>> 5] & (1 << (i & 31))) {
+                buf[o++] = air;
+                continue;
+              }
+              let v = d[row + x * f];
+              if (v < CT_FLOOR) v = CT_FLOOR;
+              buf[o++] = encodeVeno(veno, v, vb + Math.floor((sx0 + x * f) / veno.f), bone !== null);
+            }
+            continue;
+          }
           for (let x = 0; x < nx; x++) {
             const i = ri + x;
             if (removed && removed[i >>> 5] & (1 << (i & 31))) {
@@ -403,19 +429,40 @@ export class VolumeRenderer {
             }
             let v = d[row + x * f];
             if (ct && v < CT_FLOOR) v = CT_FLOOR;
+            let inArea = false;
             if (bone) {
               const bi = by + Math.floor((sx0 + x * f) / bone.f);
-              if (bone.bits[bi >>> 5] & (1 << (bi & 31))) {
+              inArea = (bone.bits[bi >>> 5] & (1 << (bi & 31))) !== 0;
+              if (!inArea && ha && v >= hard!.hu) {
+                const ai = (Z * ha.ny + Math.floor(Y / ha.f)) * ha.nx + Math.floor((sx0 + x * f) / ha.f);
+                if (!(ha.bits[ai >>> 5] & (1 << (ai & 31)))) inArea = true;
+              }
+              if (quiet && !inArea && v > hide && !(quiet[bi >>> 5] & (1 << (bi & 31)))) v = hide;
+            }
+            // most voxels: no vessels, or in the bone area and below any vessel (encodeCT, inlined here for speed)
+            if (!m || (inArea && (!paired || v < VEIN_MIN_HU))) {
+              buf[o++] = inArea ? -BONE_OFFSET - v : v;
+              continue;
+            }
+            const vi = vr + Math.floor((sx0 + x * f) / m.arteries.f), bit = 1 << (vi & 31), w = vi >>> 5;
+            let isA = (m.arteries.bits[w] & bit) !== 0, isV = (m.veins.bits[w] & bit) !== 0;
+            if (paired && v >= VEIN_MIN_HU) {
+              const onEdge = edge !== undefined && (edge.bits[w] & bit) !== 0;
+              if (byVoxel(m, v, inArea, isA, onEdge)) {
+                const r = voxelRule(m, d, vol.cols, slice, row + x * f, v, inArea, isA, isV, onEdge);
+                if (r === IN_AREA) inArea = true;
+                else if (r !== KEEP) {
+                  inArea = false;
+                  isA = r === ARTERY;
+                  isV = r === VEIN;
+                }
+              }
+              if (inArea) {
                 buf[o++] = -BONE_OFFSET - v;
                 continue;
               }
             }
-            if (this.vessels) {
-              const a = this.vessels.arteries;
-              const vi = vr + Math.floor((sx0 + x * f) / a.f);
-              v = encodeVessel(v, (a.bits[vi >>> 5] & (1 << (vi & 31))) !== 0, (this.vessels.veins.bits[vi >>> 5] & (1 << (vi & 31))) !== 0);
-            }
-            buf[o++] = v;
+            buf[o++] = encodeWith(m, v, isA, isV, row + x * f, !!bone);
           }
         }
       }

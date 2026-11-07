@@ -1,10 +1,14 @@
 /**
  * The range editor of a segment: a histogram of the voxels around the seed with two handles (min / max). Dragging one
- * grows the segment again from the same seed, as often as the device keeps up.
+ * grows the segment again from the same seed, as often as the device keeps up; when one grow takes longer than
+ * SLOW_MS (a large segment on a phone), the handle follows the finger and the segment grows when it pauses or lifts.
  */
 import type { Volume } from "../dicom/volume";
 import { dragRange, fmtMl, histColumns } from "./segment";
 import type { Segment, Segments } from "./segments";
+
+const SLOW_MS = 150;
+const PAUSE_MS = 350;
 
 export class SegmentPanel {
   seg: Segment | null = null;
@@ -14,6 +18,8 @@ export class SegmentPanel {
   private drag: "lo" | "hi" | null = null;
   private pending: [number, number] | null = null;
   private busy = false;
+  private pauseTimer = 0;
+  private growing = false;
   lastGrowMs = 0;
   /** After a drag ended: the final mask (the 3D view may polish its surface). */
   onSettled: () => void = () => undefined;
@@ -30,6 +36,12 @@ export class SegmentPanel {
     this.canvas.addEventListener("pointerup", () => this.up());
     this.canvas.addEventListener("pointercancel", () => this.up());
     $("seg-done").addEventListener("click", () => this.close());
+    $<HTMLInputElement>("seg-color").addEventListener("input", (e) => {
+      if (!this.seg) return;
+      const hex = (e.target as HTMLInputElement).value;
+      this.segs.setColor(this.seg, [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number]);
+      this.sync();
+    });
     $("seg-hide").addEventListener("click", () => {
       if (!this.seg) return;
       this.segs.setVisible(this.seg, !this.seg.visible);
@@ -51,9 +63,12 @@ export class SegmentPanel {
     return !this.root.hidden;
   }
 
-  open(vol: Volume, seg: Segment): void {
+  /** ms: how long the seed took to grow (shown beside the range, like every re-grow after it); left out, the last
+   * grow's time stays, so a slow device keeps the handle free from the first drag. */
+  open(vol: Volume, seg: Segment, ms?: number): void {
     this.vol = vol;
     this.seg = seg;
+    if (ms !== undefined) this.lastGrowMs = ms;
     this.fitView();
     this.root.hidden = false;
     this.sync();
@@ -103,6 +118,8 @@ export class SegmentPanel {
   private up(): void {
     if (!this.drag) return;
     this.drag = null;
+    clearTimeout(this.pauseTimer);
+    this.pump();                                  // a slow device: the grow that waited for the finger
     const s = this.seg;
     if (s) {
       // a handle at the edge of the view: show more of the histogram for the next drag
@@ -124,38 +141,57 @@ export class SegmentPanel {
     const [lo, hi] = dragRange(this.drag!, v, s.lo, s.hi, s.seedValue);
     this.pending = [lo, hi];
     this.draw(lo, hi);
-    this.pump();
+    this.label(lo, hi);
+    clearTimeout(this.pauseTimer);
+    if (this.lastGrowMs < SLOW_MS) this.pump();
+    else this.pauseTimer = window.setTimeout(() => this.pump(), PAUSE_MS);
   }
 
-  /** One grow at a time, with a pause as long as the last one took: the page stays responsive on a phone. */
+  /** One grow at a time, with a pause as long as the last one took: the page stays responsive on a phone. A slow grow
+   * says "growing…" first (it runs on this thread, so the text is painted before it starts). */
   private pump(): void {
     if (this.busy || !this.pending) return;
     this.busy = true;
-    requestAnimationFrame(() => {
+    const slow = this.lastGrowMs >= SLOW_MS;
+    if (slow) {
+      this.growing = true;
+      this.label(...this.pending);
+    }
+    requestAnimationFrame(() => setTimeout(() => {
       const p = this.pending, s = this.seg, vol = this.vol;
       this.pending = null;
       if (p && s && vol) {
         const t0 = performance.now();
         this.segs.setRange(vol, s, p[0], p[1]);
         this.lastGrowMs = performance.now() - t0;
-        this.sync();
       }
+      this.growing = false;
+      this.sync();
       setTimeout(() => {
         this.busy = false;
-        if (this.pending) this.pump();
-        else if (!this.drag) this.onSettled();
+        if (!this.pending) {
+          if (!this.drag) this.onSettled();
+        } else if (!this.drag || this.lastGrowMs < SLOW_MS) this.pump();
+        else this.pauseTimer = window.setTimeout(() => this.pump(), PAUSE_MS);   // still moving: wait for a pause
       }, Math.min(300, this.lastGrowMs));
-    });
+    }, 0));
+  }
+
+  /** The range, and how long the last grow took (or that one is under way). */
+  private label(lo: number, hi: number): void {
+    const unit = this.vol?.modality === "CT" ? " HU" : "";
+    const ms = this.lastGrowMs;
+    const t = this.growing ? " · growing…" : ms > 0 ? ` · ${ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`}` : "";
+    (document.getElementById("seg-range") as HTMLElement).textContent = `${Math.round(lo)} to ${Math.round(hi)}${unit}${t}`;
   }
 
   private sync(): void {
     const s = this.seg;
     if (!s) return;
-    const unit = this.vol?.modality === "CT" ? " HU" : "";
     (document.getElementById("seg-name") as HTMLElement).textContent = s.name;
-    (document.getElementById("seg-dot") as HTMLElement).style.background = `rgb(${s.color.join(",")})`;
+    (document.getElementById("seg-color") as HTMLInputElement).value = `#${s.color.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
     (document.getElementById("seg-ml") as HTMLElement).textContent = s.grown ? fmtMl(s.ml) : "The seed is outside this range";
-    (document.getElementById("seg-range") as HTMLElement).textContent = `${Math.round(s.lo)} to ${Math.round(s.hi)}${unit}`;
+    this.label(s.lo, s.hi);
     (document.getElementById("seg-hide") as HTMLElement).textContent = s.visible ? "Hide" : "Show";
     this.draw();
   }

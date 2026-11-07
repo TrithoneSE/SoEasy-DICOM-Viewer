@@ -39,6 +39,7 @@
 
 - [Highlights](#highlights)
 - [Screenshots](#screenshots)
+- [What's new in 1.0.5](#whats-new-in-105)
 - [Download and install](#download-and-install)
 - [Web version](#web-version)
 - [System requirements](#system-requirements)
@@ -70,6 +71,13 @@
 - **Colour 3D volume rendering** with an interactive curve editor: tissue colours and opacity drawn as curves over
   the histogram, a **bone colour lock** that keeps bone in bone colours, and a **rim filter** that separates an
   enhancing tumour from the walls of contrast-filled vessels.
+- **Bone that stays bone** — the bone lock takes bone from the study's plain (pre-contrast) scan when there is one,
+  lined up slab by slab if the patient moved: what was bone before contrast is bone, and only what got brighter is a
+  vessel, so an aneurysm on the clinoid stays whole and a child's thin facial bones stay white. A newborn's skull plates
+  are found by their shape, with the fontanelles and sutures left open. 3D opens with the lock on in one step.
+- **Arteries and veins** in two colours — from both phases of a CTA, or from one routine contrast series with a vessel
+  atlas of the head and two trees grown through the vessels (88 % of vessel voxels right on 6 real CTAs).
+- **CT venography** — the dural sinuses, cortical and deep veins in blue over a faint brain and skull, arteries hidden.
 - **Segmentation** — click a lesion, get a 3D surface and its volume in ml; tune what enters it with two handles
   over its histogram, refine with a brush; export STL.
 - **3D tools** — crop box, scalpel, 3D measurements, snapshots and fly-through movies (animated GIF).
@@ -98,6 +106,29 @@ All images below come from real clinical studies shown in the viewer's anonymous
 | <img src="docs/media/3d-tumor-feeders.gif" height="280" alt="Rotating view of the segmented tumour and its vessels"> | <img src="docs/media/dsa.gif" height="280" alt="DSA run playing"> |
 | **Segmentation in motion** — the segmented tumour turning with its feeding arteries. | **DSA cine** — a subtracted run playing at the scanner's frame rate. |
 
+| | |
+|---|---|
+| <img src="docs/media/3d-aneurysm-bone-lock.png" height="420" alt="CTA from above with the vault cut away: an aneurysm on the ICA, whole and red, the skull base white"> | <img src="docs/media/3d-arteries-veins.png" height="420" alt="Arteries red and veins blue on one routine contrast head CT, seen from the right"> |
+| **Bone lock from the plain scan** — a CTA from above, vault cut away: the aneurysm and its ICA on the clinoid stay whole and red, the skull base stays white. | **Arteries and veins on one series** — a routine contrast head CT of a child: the vessel atlas and two trees colour the sinuses and jugular blue, the carotids and the circle of Willis red. |
+| <img src="docs/media/3d-venography.png" height="420" alt="CT venography from above: sinuses and cortical veins in blue inside a faint skull"> | <img src="docs/media/collage.png" height="420" alt="Collage of a head CT: 25 axial slices every 5 mm in one image, patient shown as Anonymous"> |
+| **CT venography** — the same study from above: superior sagittal sinus, cortical and deep veins, no arteries. | **Collage** — a head CT as one 5 × 5 image, one slice every 5 mm, in the anonymous display mode. |
+
+## What's new in 1.0.5
+
+- **Bone lock from the plain scan**: on a study with a pre-contrast scan, bone is what was bone before contrast, voxel
+  by voxel; a scan the patient moved in is lined up slab by slab (40 mm, up to 4 mm). An aneurysm and its ICA lying on
+  the clinoid keep their edge, and a child's thin facial bones, spine and ribs stay white. The 3D panel says which
+  source was used (plain scan, CTA rule, newborn skull or threshold).
+- **Newborn skull**: skull plates under 500 HU are found by their shape and coloured as bone from 150 HU; fontanelles
+  and sutures stay open instead of the whole skull turning red.
+- **Arteries and veins on one contrast series**: the vessel atlas plants seeds (sinuses, thick veins, ICA / M1 /
+  basilar) and two trees grow through the vessels, so a sinus stays blue along its length and the jugular follows the
+  sigmoid sinus (84 → 88 % of vessel voxels right on 6 real CTAs).
+- **CT venography shows veins only**: arteries found by both phases or by the atlas are hidden.
+- **Web**: the bone area is made in a background worker before the first 3D frame, so 3D opens with the bone lock on in
+  one step; on an iPhone the plain scan is read for the bone area and released after, and a CTA's other phase is not
+  read (it ran out of memory).
+
 ## Download and install
 
 Download the latest version from the [**Releases**](../../releases) page:
@@ -123,6 +154,16 @@ device; images are never uploaded. Its source is in [`web/`](web) of this reposi
 Colour presets are the same .json files in both: export a preset here and import it in the web version, or the
 other way round.
 
+On phones and tablets the web version spares the device: a thin-pixel series (< 0.6 mm) is segmented on a grid halved
+in-plane (a quarter of the work; the volume may differ by a few ml from the desktop's), and on an iPhone 3D opens a
+large series (over ~80 MB of texture, e.g. a 0.625 mm head CT) at half resolution — *Full* in the 3D panel switches back.
+The bone area of 3D and the sinus tracing of arteries / veins work on bit masks, 32 cells at a time (the same cells as
+before; arteries / veins on a 0.625 mm CTA ~19 → ~13 s on a laptop). The bone area is made in a
+background worker before the first 3D frame, so 3D opens with the bone lock on in one step while the wait panel keeps
+turning; turning the lock on later, or moving its threshold, makes it there while the 3D view can still be turned.
+Timings on a phone mean something only over https and from a production build: the same build served over plain http
+from a laptop was 20–80× slower on an iPhone.
+
 | | Desktop (this app) | [Web](https://trithonese.github.io/SoEasy-DICOM-Web/) |
 |---|:---:|:---:|
 | Runs on | Windows 10 / 11 | any modern browser, iPad, iPhone |
@@ -130,7 +171,9 @@ other way round.
 | DSA with automatic pixel shift | ✅ | ✅ |
 | Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
 | MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
-| Measurements | all 2D and 3D tools | 2D length, angle, Cobb, ellipse ROI; 3D length |
+| Bone from the plain scan, newborn skull | ✅ | ✅ |
+| Arteries / veins (both phases or vessel atlas), CT venography | ✅ | ✅ (on a phone from one series: a phone does not read a CTA's other phase) |
+| Measurements | all 2D and 3D tools | 2D and MPR length, open polygon, angle, Cobb, ellipse ROI, movable captions; 3D length |
 | Collage | ✅ | ✅ |
 | Seed segmentation with range editor | ✅ | ✅ |
 | STL, brush, 3D movies | ✅ | — |
@@ -210,10 +253,71 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
   colour picker that creates a curve from a tissue you click in 2D.
 - **Bone colour lock**: the bone area is coloured only by bone curves, so vessels or a tumour with the same HU as the
   edge of bone keep their own colour. Bone is told from vessels by density, not by one threshold: an artery or an
-  aneurysm above 500 HU on a CTA stays a vessel, even touching bone.
-- **Arteries and veins** (preset *CT Angio - Arteries / Veins*): on an arterial-phase CTA, arteries are the bright
-  vessels and what connects to them, so a small branch is not painted as a vein and an artery has no blue rim. On a
-  late phase both are equally bright and cannot be separated.
+  aneurysm above 500 HU on a CTA stays a vessel, even touching bone. The masks are found on a ~1 mm grid, but the edge
+  of the bone area is drawn voxel by voxel from the HU (with both phases: bone is what the contrast does not change), so
+  a sinus or an artery against the skull base keeps a smooth surface instead of blocks.
+  When the study also has its plain (pre-contrast) scan, the bone comes from that scan instead: what was bone before
+  contrast is bone, voxel by voxel, and only what got brighter with contrast takes a vessel colour. This keeps a child's
+  thin facial bones and spine, a rib or the sternum white, where HU alone painted them red, and the bone curves start
+  at 200 HU so thin bone shows. On a real infant contrast CT, 60 % of what had the vessel colour was bone on the plain
+  scan; from it, none. A plain scan that does not line up as a whole (a CTA from the chest to the vertex: the head lies
+  still while the jaw and neck bend between the scans) is lined up slab by slab, 40 mm each, moved by up to 4 mm; the
+  slabs that still do not line up keep the rule below. The plain scan comes first also on a CTA opened with its other
+  phase: a patient who moved between the phases had bone edges that "changed" and came out red. With both phases,
+  bone outside the area that the phases do not call an artery stays bone too. A lumen is what got brighter where the
+  plain scan held blood (under 130 HU): a plain scan of thicker slices blurs thin bone to 150–280 HU, which read as
+  contrast before. A lumen lying on bone (an aneurysm and its ICA on the clinoid) keeps its edge: where the plain scan
+  at the voxel itself is blood and the series 150 HU brighter, joined to a lumen within 1 mm, it is a vessel. On a
+  phone the plain scan is read for the bone area and let go after (its copy on the bone grid stays). A phone does not
+  read a CTA's other phase: the two series and their classification closed the page (an iPhone, 2 × 298 MB), so there
+  the face of a CTA whose patient moved between the scans can still come out redder than on Windows, where with both
+  phases bone outside the area that the phases do not call an artery stays bone (as on the web of a computer). What breathing moved more than that (ribs, clavicles of a CTA down to the chest) can still come
+  out red. Without a plain scan, the rule for bright vessels is used only on a CTA; on a routine contrast
+  CT everything above the threshold is bone. On a newborn's skull (most of its bone under 500 HU) the skull plates are
+  found by their shape and are bone too, without the rule for bright vessels, and the bone curves start at 150 HU: the
+  plates show white and the fontanelles and sutures stay open. The panel says which one was used. (Windows lines up a plain scan the
+  patient moved in first; the web uses it only when it lines up as it is, to stay quick on a phone.)
+- **Venography** (preset *CT Venography (contrast CT)*): a contrast head CT's dural sinuses and cortical and deep veins
+  in blue over a faint brain, inside a faint skull and skin, and the neck's veins. The inside of the skull has curves of
+  its own (Brain, Veins), so brain and scalp, which have the same HU, are coloured apart; gaps in the skull (an infant's
+  fontanelles) are closed first. Vessels are told from the skull by their shape as well as their HU: a newborn's skull
+  plates have the HU of veins (150-450 HU) but are thin sheets, found by the Hessian and never coloured as vessels, and
+  they bound the cavity (before, the open sutures came out as veins). The study's plain scan, when it lines up (also of
+  another field of view or tilt, and after the patient's motion between the scans is found and undone), adds that a
+  vessel is bright only after contrast. Decisions are made on a voxel with its neighbours, so the noise of a thin
+  low-dose scan does not turn the brain blue.
+- **Arteries and veins** (preset *CT Angio - Arteries / Veins*): when the study has both an arterial and a venous series
+  on the same grid, opening either one shows arteries with the HU of the arterial series and veins with those of the
+  venous series. They are told apart by the time course and, where the "arterial" series was late and the sinuses
+  already full, by anatomy (long thick vessels against the skull are sinuses); both grow through the vessels and meet
+  where the trees touch. A pre-contrast series removes what was bright before contrast. A plain series is never taken
+  for a phase: both must show contrast inside the skull. When both series came after the arterial peak (sinuses and
+  neck arteries equally bright and washing out alike: 2 of 7 real CTAs), the time course says nothing and anatomy
+  decides: in the head the vessel atlas (below); in the neck the jugulars are the lateral vessels and the carotids the
+  medial ones, and the descending aorta is an artery. Bone that moved
+  between the phases (jaw, shoulders) stays bone instead of turning into vein blocks or holes. 3D opened from the
+  venous series starts on this preset; from the arterial series, or from a routine contrast CT, it starts on
+  *Vessels + Bone*, and arteries / veins are one choice away (on one series with a note that the venous series of a
+  CTA separates them more accurately). Separating them takes a few seconds; a "please wait" panel shows meanwhile.
+- **Vessel atlas: arteries and veins on one contrast series** (a routine head CT + contrast, a tumour study, one phase
+  of a CTA opened alone, and a CTA whose arterial series was late): an atlas of where arteries and veins run in the head
+  (`assets/vessel_atlas.bin`, built from multiphase CTAs by `tools/build_vessel_atlas.py`) is laid onto the scan by its
+  skull — position, rotation (a routine head CT is often tilted ~35° from a CTA), size — and labels the head's vessels;
+  this patient's own HU, learnt from the places the atlas is sure of, and the course of each vessel refine it.
+  Leave-one-out on 5 CTAs (atlas from 4, one series of the 5th, scored against its two-phase result): 84–94 % of the
+  vessel voxels right (the anatomy tracing alone: 45–78 %). Large vessels (circle of Willis, carotid siphons, sinuses,
+  deep veins) are reliable; small cortical vessels against the skull may be wrong, as their course varies between
+  people. On a series that is not arterial (arteries and veins equally bright), the atlas then only plants seeds: veins
+  in the traced sinuses and the thick vessels it is sure are veins, arteries in the thick ones it is sure are arteries
+  (ICA, M1, basilar). Two trees grow from them through the vessels, and every vessel takes the label of the tree it is
+  joined to, so a sinus stays blue all along and the internal jugular vein follows the sigmoid sinus. Scored the same
+  way on 6 real CTAs (the venous series alone against its own two phases): 84 % of the head's vessel cells right with
+  the atlas alone, 88 % with the trees, better on each study. Where a thin contact joins an artery and a vein, the tree
+  that gets there first may take a stretch of the other. The *CT Venography* preset hides the arteries found this way (or
+  by both phases of a CTA), so the MCA and ACA no longer show as veins; without an atlas that fits, it shows every vessel
+  as before. The vessel curves of the preset move onto the scan's own vessel HU (~100–140 HU on a routine contrast CT).
+  Outside the head, without a skull that fits the atlas, the sinuses are traced by anatomy (thick vessels against the
+  inner table, tentorium and falx) and shown in blue, every other vessel red.
 - **Rim filter**: curves marked *hide partial-volume rims* colour only homogeneous tissue, using a value × gradient
   transfer function, so an enhancing tumour is not confused with the walls of contrast-filled vessels. The *Rim
   threshold* slider sets how strict it is.
@@ -224,9 +328,23 @@ slower (the 3D view then uses half resolution for large volumes). The Start-menu
   an animated GIF or PNG sequence.
 
 ### Segmentation
-- Ctrl+click a lesion in 2D (or use *Seed*): the region grows from the click with a range from the local statistics
-  (or a tolerance, a manual range, or the range of a colour curve), limited to the crop box if wanted, with an
-  anti-leak setting.
+- Ctrl+click a lesion in 2D (or use *Seed*): the region grows from the click, and its range curve opens right there, over
+  the 2D and MPR windows. Drag its handles and the segment follows on the slices; no 3D is prepared until *Show in 3D*.
+  The 3D window has the same curve, and a change in either moves the other. Re-growing looks first in a small window
+  around the click and widens it only when the segment reaches its side, so a tumour follows the handles at once
+  (real 0.43 mm CT: ~0.03 s for a 14 ml lesion, was ~0.4 s); a region that runs through much of the head takes seconds,
+  and the curve says *growing…* meanwhile. The web grows the same way, widening only the sides the segment reaches
+  (a seed on a 0.625 mm CT: a small lesion in ~0.15 s, a large frontal tumour in a few seconds, where it used to take
+  minutes on a phone), with a *Segmenting…* bar.
+- **On CT the automatic range keeps out of the neighbouring tissue**: a heterogeneous enhancing tumour has a wide spread
+  of HU, so mean ± 2.5 SD reached down into the brain and the segment ran through it (real 0.625 mm CT: a frontal tumour
+  came out at 100–700 ml). The range now stops at the valley between the tissue clicked and the largest tissue next to
+  it in the histogram around the click (~56 HU there instead of ~38: the tumour alone, ~60–110 ml).
+- **Anti-leak** (1.6 mm by default): contacts narrower than about 3 mm are cut, on lightly smoothed values so CT noise
+  does not break the lesion apart, so a tumour does not run into a neighbour of the same HU (muscle, mucosa) through a
+  thin contact. Set it to 0 for thin vessels.
+- With the 3D window open, the range can also come from a tolerance, a manual range or a colour curve, limited to the
+  crop box if wanted.
 - *Smooth noise first* (off by default) grows on a lightly smoothed copy so CT noise does not break a lesion apart;
   leave it off for thin structures such as small vessels. Toggling it re-grows the selected segment from its click
   straight away, so you can compare both results (not after brush edits, which re-growing would discard).
@@ -317,6 +435,9 @@ dcv/
   tf_model.py           colour curves and presets
   tf_editor.py          curve editor widget
   segment.py            per-series state, bone lock, region growing
+  phases.py             arterial and venous series of a CTA: arteries, veins, bone
+  atlas.py              vessel atlas: skull registration, arteries / veins by where they run
+  seed_range.py         range curve of a seed, in 2D and 3D
   dsa.py                digital subtraction
   dti.py                diffusion tensor and tractography
   tract_window.py       tractography window

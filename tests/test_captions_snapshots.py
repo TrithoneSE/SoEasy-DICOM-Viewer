@@ -170,10 +170,17 @@ def run():
         w._on_seed(st, nz // 2, ny // 2, nx // 2)
         app.processEvents()
         stages = [t for _, t, _ in shown]
-        check(any("Preparing" in t for t in stages) and any("Growing" in t for t in stages),
-              f"busy panel during seed: {stages}")
+        check(any("Growing" in t for t in stages), f"busy panel during seed: {stages}")
+        check(w.vr_windows.get(id(st)) is None, "a seed alone does not open the 3D window")
+        check(w.seed_panel.isVisible() and st.active_segment is not None, "the curve opens in 2D")
+        shown.clear()
+        w.seed_panel.d3_btn.click()
+        app.processEvents()
+        stages = [t for _, t, _ in shown]
+        check(any("Preparing" in t for t in stages), f"busy panel opening 3D from the panel: {stages}")
         vw = w.vr_windows.get(id(st))
-        check(vw is not None, "seed opened the 3D window")
+        check(vw is not None, "Show in 3D opened the 3D window")
+        w.seed_panel.hide()
 
         # 3b) Smooth noise first: off by default, toggling re-grows the selected segment in place
         check(not vw.seg_smooth.isChecked(), "Smooth noise first is off by default")
