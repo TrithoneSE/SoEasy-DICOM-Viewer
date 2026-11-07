@@ -26,8 +26,9 @@
 </p>
 
 > **On an iPad, iPhone or a computer without Windows?** Use **[SoEasy DICOM Web](https://trithonese.github.io/SoEasy-DICOM-Web/)**,
-> the browser version of this viewer — 2D, cine, DSA, MPR, reference lines and colour 3D, nothing to install, images
-> never uploaded. See [Web version](#web-version) for what each version can do.
+> the browser version of this viewer — 2D, cine, DSA, collage, MPR, reference lines, colour 3D (bone lock, arteries /
+> veins, venography) and tumour segmentation with its volume in ml, nothing to install, images never uploaded. See
+> [Web version](#web-version) for what each version can do.
 
 > **Not a medical device.** SoEasy DICOM Viewer is a visualisation tool for education, research and personal use.
 > It is not certified for diagnosis or treatment decisions. Always rely on the original images and the radiologist's
@@ -79,7 +80,7 @@
   atlas of the head and two trees grown through the vessels (88 % of vessel voxels right on 6 real CTAs).
 - **CT venography** — the dural sinuses, cortical and deep veins in blue over a faint brain and skull, arteries hidden.
 - **Segmentation** — click a lesion, get a 3D surface and its volume in ml; tune what enters it with two handles
-  over its histogram, refine with a brush; export STL.
+  over its histogram, refine with a brush; export STL. The web version segments the same way (no brush or STL yet).
 - **3D tools** — crop box, scalpel, 3D measurements, snapshots and fly-through movies (animated GIF).
 - **DSA** for X-ray angiography runs: mask from the scanner or any frame, manual and automatic pixel shift, cine at
   the run's own frame rate.
@@ -167,17 +168,21 @@ from a laptop was 20–80× slower on an iPhone.
 | | Desktop (this app) | [Web](https://trithonese.github.io/SoEasy-DICOM-Web/) |
 |---|:---:|:---:|
 | Runs on | Windows 10 / 11 | any modern browser, iPad, iPhone |
-| 2D, presets, MIP / MinIP slabs, cine | ✅ | ✅ |
+| 2D: window / level, presets, auto window, invert, cine | ✅ | ✅ |
+| 2D: MIP / MinIP / average slabs, filters, colour maps, rotate / flip | ✅ | — (slabs in MPR only) |
 | DSA with automatic pixel shift | ✅ | ✅ |
-| Layouts with reference lines | up to 5 × 5 | up to 2 × 2 |
-| MPR, colour 3D, bone lock, rim filter, crop, scalpel, snapshots | ✅ | ✅ |
-| Bone from the plain scan, newborn skull | ✅ | ✅ |
-| Arteries / veins (both phases or vessel atlas), CT venography | ✅ | ✅ (on a phone from one series: a phone does not read a CTA's other phase) |
-| Measurements | all 2D and 3D tools | 2D and MPR length, open polygon, angle, Cobb, ellipse ROI, movable captions; 3D length |
+| Layouts with reference lines, 3D cursor | up to 5 × 5 | 1 × 1, 1 × 2, 1 × 3, 2 × 2 |
 | Collage | ✅ | ✅ |
-| Seed segmentation with range editor | ✅ | ✅ |
-| STL, brush, 3D movies | ✅ | — |
-| DTI, fusion, anonymous display | ✅ | — |
+| MPR (oblique, MIP / MinIP / average slab) | ✅ | ✅ |
+| Colour 3D: curve editor, presets (JSON shared), bone lock, rim filter, VR / MIP / MinIP | ✅ | ✅ |
+| 3D crop box, scalpel with undo, snapshots, PNG of the view | ✅ | ✅ |
+| Bone from the plain scan, newborn skull | ✅ | ✅ (the plain scan only when it lines up as it is; Windows lines up a moved scan slab by slab first) |
+| Arteries / veins (both phases or vessel atlas), CT venography | ✅ | ✅ (on a phone from one series: a phone does not read a CTA's other phase) |
+| Tumour segmentation: seed (Ctrl+click), automatic range, anti-leak, range editor over the histogram, volume in ml, shown in 2D, MPR, collage and 3D | ✅ | ✅ (up to 4 segments in 3D; thin-pixel series on a halved grid on phones) |
+| Segmentation: *smooth noise first*, range from a tolerance / manual range / colour curve / crop box, brush, STL export | ✅ | — |
+| Measurements | all 2D and 3D tools | 2D and MPR length, open polygon, angle, Cobb, ellipse ROI, movable captions; 3D length |
+| Snapshot movies (GIF), snapshot files | ✅ | — |
+| DTI, fusion, anonymous display, DICOM tags | ✅ | — |
 | Archives | .zip, .rar, .7z, .tar | .zip |
 
 The web version's details are in [`web/README.md`](web/README.md).

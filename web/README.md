@@ -1,9 +1,11 @@
 # SoEasy DICOM Viewer — web (PWA)
 
 A web version of the desktop viewer that installs on iPad / iPhone from Safari ("Add to Home Screen") and runs
-offline. Phase 1: **2D viewing, cine and DSA**. Phase 2: **MPR** (oblique, slab). Phase 3: **3D volume rendering**
-with the colour curves of `dcv/tf_model.py`, the bone lock and the rim threshold. DTI is unlikely to fit
-in a browser tab.
+offline: **2D viewing, cine and DSA**, layouts with reference lines, collage, **MPR** (oblique, slab), **3D volume
+rendering** with the colour curves of `dcv/tf_model.py`, the bone lock (also from the plain scan), arteries / veins,
+CT venography and the rim threshold, and **tumour segmentation** (seed, range editor, volume in ml, shown in 2D, MPR
+and 3D). What the desktop has and the web not yet is under [Not done yet](#not-done-yet); DTI is unlikely to fit in a
+browser tab.
 
 > Personal visualisation aid — **not a certified diagnostic device** (shown on the start screen and in About).
 
@@ -27,8 +29,8 @@ All DICOM processing runs in the browser. There is no server code, no upload and
 | 2D | W/L drag (same sensitivity as the desktop), presets 1–9 of the desktop, default / auto window, invert; pinch zoom + two-finger pan, double tap = fit; mouse: wheel = frames, Ctrl+wheel / trackpad pinch = zoom, middle = pan, right = zoom; scroll tool and frame slider |
 | Layout | 1 × 1, 1 × 2, 1 × 3, 2 × 2 (side by side in landscape, stacked in portrait): tap a view, then a series to show it there; empty views are filled with series of the same study, planes not yet shown first (MRI: axial + sagittal + coronal). **Reference lines**: in each view, where the slice of every other view cuts it (Image Position / Orientation of each slice, same Frame of Reference only), clipped to the other image, in that view's colour (solid for the active view). **Locate** (3D cursor, C, or Shift + press with any tool): the point touched is found in the other series, which go to the slice through it and mark it with a cyan cross; Esc hides it. Series in the other views stay in memory while MPR / 3D is open when they are small together (¼ of the budget), else they reload on the way back |
 | Collage | Port of `dcv/collage.py` (toolbar, Ctrl+G): the active series on one image of 5 × 5, 4 × 4, 4 × 3, 3 × 3, 3 × 2, 6 × 5 or up to 12 × 12 tiles, one slice every 5 mm by default, the run centred in the series; the Position slider moves it and Centre puts it back. Slices already that far apart are all kept; a run's frames are spread over the image. Tiles use the view's window, invert and DSA; optional header, image number and position. Tile width 256–512 px, narrowed when the page would pass 16 million pixels (a larger canvas stays blank on iOS). Save PNG / JPEG (share sheet on iOS), Copy (https only) |
-| Seed | Port of `dcv/segment.py` `region_grow` / `auto_grow` (same voxels as the desktop on the sample CT): Seed tool or Ctrl + click in 2D / MPR; automatic range from around the seed, anti-leak, ±70 mm block. Shown in 2D, MPR, collage and as a solid surface in 3D, with the volume in ml. A histogram of the voxels around the seed has two handles: dragging one grows the segment again from the same seed, live. 3D shows up to 4 segments. Not ported: the desktop's "smooth noise first" (its smoothed block would cost ~90 MB on a phone), the brush and STL |
-| Measure | Length, ellipse ROI (area, diameters, mean, SD, min, max; HU on CT), angle, Cobb angle, with the desktop's captions. Angle and Cobb: a drag, then a second drag or tap; tapping point by point works too |
+| Segmentation | Port of `dcv/segment.py` `region_grow` / `auto_grow` (same voxels as the desktop on the sample CT): Seed tool or Ctrl + click in 2D / MPR; automatic range from around the seed (on CT it stops at the histogram valley next to the tissue clicked, like the desktop), anti-leak, ±70 mm block, grown in a small window first and widened only on the sides the segment reaches. Shown in 2D, MPR, collage and as a solid surface in 3D, with the volume in ml; colour, hide and delete per segment. A histogram of the voxels around the seed has two handles: dragging one grows the segment again from the same seed, live. 3D shows up to 4 segments. On phones and tablets a thin-pixel series (< 0.6 mm) grows on a grid halved in-plane (the volume may differ by a few ml). Not ported: the desktop's "smooth noise first" (its smoothed block would cost ~90 MB on a phone), a range from a tolerance / manual range / colour curve / crop box, the brush and STL |
+| Measure | Length, open polygon (tap point by point, double tap or Enter ends it), ellipse ROI (area, diameters, mean, SD, min, max; HU on CT), angle, Cobb angle, with the desktop's captions, in 2D and MPR. Angle and Cobb: a drag, then a second drag or tap; tapping point by point works too |
 | 3D measure | Length between two points of the visible surface (L): one ray marched on the CPU with the current curves, crop, cuts and bone lock, ~0.03 ms per pick on a PC, no extra graphics memory (a ~130 kB opacity table while measuring). The points are 3D, so the line follows every turn |
 | Length | mm below 1 cm, cm above (`measure.fmt_len`); end points draggable, Delete / trash removes |
 | Cine | Per series, frame rate from Frame Time / Frame Time Vector / Cine Rate (desktop rules), play on opening a run, ± fps, Space |
@@ -70,7 +72,8 @@ three cornerstone codec packages (all MIT / ISC).
 cd web
 npm install
 npm run dev        # http://localhost:5173
-npm test           # unit tests (Node): parser, RLE, zip, series grouping, storage, DSA, labels
+npm test           # unit tests (Node): parser, RLE, zip, series grouping, DSA, measurements, collage, layouts,
+                   # segmentation, bone lock and plain scan, phases, vessel atlas and trees, venography, 3D picking
 npm run build      # type-check + static site in web/dist
 npm run preview    # serve web/dist (service worker active)
 ```
@@ -193,8 +196,9 @@ process private memory. An iPad is slower; memory should be similar.
   rays take double steps and a cheaper gradient (3 fetches instead of 6); a still frame is at most 2.2 M pixels on
   phones and tablets (3.2 M elsewhere): one frame at rest may take its time. Opening MPR or 3D drops the other decoded series from memory (they reload when chosen), and on
   iOS decoded series are kept under 450 MB.
-- Bone lock: the bone area is computed on the main thread (~1–2 s on the PC for 300 × 512², more on an iPad; on a
-  grid halved in-plane above 20 M voxels). Dragging the threshold line recomputes it on release.
+- Bone lock: the bone area is computed in a background worker (`bone.worker.ts`; ~1–2 s on the PC for 300 × 512², more
+  on an iPad; on a grid halved in-plane above 20 M voxels) before the first 3D frame, so 3D opens with the lock on in
+  one step. Dragging the threshold line recomputes it on release while the view can still be turned.
 - Leaving 3D (or opening another series) frees the texture. iOS can still drop the WebGL context under memory
   pressure; then reopen 3D.
 - Synthetic phantoms with perfectly sharp bone edges show contour "terraces" of the voxel grid on shaded surfaces;
@@ -202,7 +206,19 @@ process private memory. An iPad is slower; memory should be similar.
 
 ## Not done yet
 
-DTI; snapshot movies (GIF fly-through) and snapshot files (.se3d) (desktop only so far); other measurements (rectangle, polygon, deviation, text…); segmentation brush and STL; 12-bit JPEG (process 2/4, `.4.51`), deflated
+What the desktop app has and the web does not yet:
+
+- DTI and tractography, fusion, anonymous display (hide patient identity), DICOM tag view;
+- in 2D: MIP / MinIP / average slabs (MPR has them), smoothing / sharpening filters, colour maps, rotate / flip, W/L ROI,
+  layouts beyond 2 × 2;
+- other measurements (rectangle, closed polygon, arrow, pencil, text, deviation, ABC/2) and 3D angle / Cobb / polygon /
+  arrow / text (3D has length);
+- segmentation: *smooth noise first*, a range from a tolerance / manual range / colour curve / crop box, the brush and
+  STL export;
+- snapshot movies (GIF fly-through) and snapshot files (.se3d);
+- archives other than .zip (.rar, .7z, .tar).
+
+Also not in the web yet: 12-bit JPEG (process 2/4, `.4.51`), deflated
 DICOM, HTJ2K, palette colour, native YBR 4:2:2; per-frame functional groups beyond the first frame (enhanced
 CT / MR multiframe use the shared values); PACS; the DSA stage 2 / 3 tools the desktop does not have either.
 Tested in desktop Chrome (headless and Electron); not yet on a real iPad — the touch handling uses Pointer Events
